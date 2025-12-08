@@ -134,9 +134,9 @@ impl<T> Sender<T> {
         let end = if self.local_head > start {
             self.local_head - 1
         } else if self.local_head == 0 {
-            self.capacity() - 1
+            self.ptr.capacity - 1
         } else {
-            self.capacity()
+            self.ptr.capacity
         };
 
         unsafe {
@@ -157,11 +157,6 @@ impl<T> Sender<T> {
         // the len can be just right at the edge of buffer, so we need to wrap just in case
         let new_tail = (self.load_tail() + len) & self.mask;
         self.store_tail(new_tail);
-    }
-
-    #[inline(always)]
-    fn capacity(&self) -> usize {
-        self.ptr.tail_capacity()
     }
 
     #[inline(always)]

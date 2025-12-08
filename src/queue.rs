@@ -18,23 +18,18 @@ use crate::{
     padded::Padded,
 };
 
-struct CacheLine {
-    shared: AtomicUsize,
-    capacity: usize,
-}
-
 /// # Invariants
 /// - tail should always point to the place where we can write next to.
 // avoid re-ordering fields
 #[repr(C)]
 struct Queue {
-    head: Padded<CacheLine>,
+    head: Padded<AtomicUsize>,
     #[cfg(feature = "async")]
     sender_sleeping: Padded<AtomicBool>,
     #[cfg(feature = "async")]
     receiver_waker: Padded<AtomicWaker>,
 
-    tail: Padded<CacheLine>,
+    tail: Padded<AtomicUsize>,
     #[cfg(feature = "async")]
     receiver_sleeping: Padded<AtomicBool>,
     #[cfg(feature = "async")]
@@ -46,6 +41,7 @@ struct Queue {
 pub(crate) struct QueuePtr<T> {
     ptr: NonNull<Queue>,
     buffer: NonNull<T>,
+    pub(crate) capacity: usize,
     _marker: PhantomData<T>,
 }
 
@@ -54,6 +50,7 @@ impl<T> Clone for QueuePtr<T> {
         Self {
             ptr: self.ptr,
             buffer: self.buffer,
+            capacity: self.capacity,
             _marker: PhantomData,
         }
     }
@@ -89,14 +86,8 @@ impl<T> QueuePtr<T> {
 
         unsafe {
             ptr.write(Queue {
-                head: Padded::new(CacheLine {
-                    shared: AtomicUsize::new(0),
-                    capacity,
-                }),
-                tail: Padded::new(CacheLine {
-                    shared: AtomicUsize::new(0),
-                    capacity,
-                }),
+                head: Padded::new(AtomicUsize::new(0)),
+                tail: Padded::new(AtomicUsize::new(0)),
 
                 #[cfg(feature = "async")]
                 sender_sleeping: Padded::new(AtomicBool::new(false)),
@@ -119,6 +110,7 @@ impl<T> QueuePtr<T> {
                 ptr,
                 buffer,
                 _marker: PhantomData,
+                capacity,
             },
             mask,
         )
@@ -133,12 +125,12 @@ impl<T> QueuePtr<T> {
 
     #[inline(always)]
     pub(crate) fn head(&self) -> &AtomicUsize {
-        unsafe { _field!(self.ptr, head.value.shared, AtomicUsize).as_ref() }
+        unsafe { _field!(self.ptr, head.value, AtomicUsize).as_ref() }
     }
 
     #[inline(always)]
     pub(crate) fn tail(&self) -> &AtomicUsize {
-        unsafe { _field!(self.ptr, tail.value.shared, AtomicUsize).as_ref() }
+        unsafe { _field!(self.ptr, tail.value, AtomicUsize).as_ref() }
     }
 
     #[inline(always)]
@@ -154,16 +146,6 @@ impl<T> QueuePtr<T> {
     #[inline(always)]
     pub(crate) fn set(&self, index: usize, value: T) {
         unsafe { self.at(index).write(value) }
-    }
-
-    #[inline(always)]
-    pub(crate) fn head_capacity(&self) -> usize {
-        unsafe { _field!(self.ptr, head.value.capacity, usize).read() }
-    }
-
-    #[inline(always)]
-    pub(crate) fn tail_capacity(&self) -> usize {
-        unsafe { _field!(self.ptr, tail.value.capacity, usize).read() }
     }
 }
 
@@ -220,12 +202,11 @@ impl<T> Drop for QueuePtr<T> {
     fn drop(&mut self) {
         let rc = unsafe { _field!(self.ptr, rc, AtomicUsize).as_ref() };
         if rc.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let capacity = self.head_capacity();
-            let (layout, _) = Self::layout(capacity);
+            let (layout, _) = Self::layout(self.capacity);
 
-            let head = self.head().load(Ordering::Acquire);
-            let tail = self.tail().load(Ordering::Acquire);
-            let mask = capacity - 1;
+            let head = self.head().load(Ordering::Relaxed);
+            let tail = self.tail().load(Ordering::Relaxed);
+            let mask = self.capacity - 1;
 
             if std::mem::needs_drop::<T>() {
                 let mut idx = head;

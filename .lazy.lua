@@ -8,12 +8,10 @@ return {
 						-- rust-analyzer language server configuration
 						["rust-analyzer"] = {
 							cargo = {
-								allFeatures = false,
 								noDefaultFeatures = true,
 								features = { "async" },
 							},
 							checkOnSave = {
-								allFeatures = false,
 								noDefaultFeatures = true,
 								features = { "async" },
 							},

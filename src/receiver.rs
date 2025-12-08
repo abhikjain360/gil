@@ -128,7 +128,7 @@ impl<T> Receiver<T> {
         let end = if self.local_tail >= start {
             self.local_tail
         } else {
-            self.capacity()
+            self.ptr.capacity
         };
 
         unsafe {
@@ -151,11 +151,6 @@ impl<T> Receiver<T> {
         // the len can be just right at the edge of buffer, so we need to wrap just in case
         let new_head = (self.load_head() + len) & self.mask;
         self.store_head(new_head);
-    }
-
-    #[inline(always)]
-    fn capacity(&self) -> usize {
-        self.ptr.head_capacity()
     }
 
     #[inline(always)]
