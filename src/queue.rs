@@ -67,8 +67,9 @@ macro_rules! _field {
 }
 
 impl<T> QueuePtr<T> {
-    pub(crate) fn with_capacity(capacity: NonZeroUsize) -> (Self, usize) {
-        let capacity = capacity.saturating_add(1).get().next_power_of_two();
+    pub(crate) fn with_capacity(capacity: NonZeroUsize) -> Self {
+        // Allocate exactly capacity + 1 slots (one slot is always empty to distinguish full from empty)
+        let capacity = capacity.get() + 1;
 
         let (layout, buffer_offset) = Self::layout(capacity);
 
@@ -77,8 +78,6 @@ impl<T> QueuePtr<T> {
         let Some(ptr) = NonNull::new(ptr) else {
             std::alloc::handle_alloc_error(layout);
         };
-
-        let mask = capacity - 1;
 
         // Calculate buffer pointer
         let buffer =
@@ -105,15 +104,12 @@ impl<T> QueuePtr<T> {
             });
         };
 
-        (
-            Self {
-                ptr,
-                buffer,
-                _marker: PhantomData,
-                capacity,
-            },
-            mask,
-        )
+        Self {
+            ptr,
+            buffer,
+            _marker: PhantomData,
+            capacity,
+        }
     }
 
     fn layout(capacity: usize) -> (alloc::Layout, usize) {
@@ -206,7 +202,6 @@ impl<T> Drop for QueuePtr<T> {
 
             let head = self.head().load(Ordering::Relaxed);
             let tail = self.tail().load(Ordering::Relaxed);
-            let mask = self.capacity - 1;
 
             if std::mem::needs_drop::<T>() {
                 let mut idx = head;
@@ -214,7 +209,10 @@ impl<T> Drop for QueuePtr<T> {
                     unsafe {
                         std::ptr::drop_in_place(self.at(idx).as_ptr());
                     }
-                    idx = (idx + 1) & mask;
+                    idx += 1;
+                    if idx == self.capacity {
+                        idx = 0;
+                    }
                 }
             }
 

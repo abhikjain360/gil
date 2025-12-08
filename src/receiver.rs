@@ -8,16 +8,24 @@ pub struct Receiver<T> {
     ptr: QueuePtr<T>,
     local_tail: usize,
     local_head: usize,
-    mask: usize,
 }
 
 impl<T> Receiver<T> {
-    pub(crate) fn new(queue_ptr: QueuePtr<T>, mask: usize) -> Self {
+    pub(crate) fn new(queue_ptr: QueuePtr<T>) -> Self {
         Self {
             ptr: queue_ptr,
             local_tail: 0,
             local_head: 0,
-            mask,
+        }
+    }
+
+    #[inline(always)]
+    fn next_head(&self) -> usize {
+        let next = self.local_head + 1;
+        if next == self.ptr.capacity {
+            0
+        } else {
+            next
         }
     }
 
@@ -28,8 +36,6 @@ impl<T> Receiver<T> {
     /// * `Some(value)` if a value is available.
     /// * `None` if the queue is empty.
     pub fn try_recv(&mut self) -> Option<T> {
-        let new_head = (self.local_head + 1) & self.mask;
-
         if self.local_head == self.local_tail {
             self.load_tail();
             if self.local_head == self.local_tail {
@@ -40,6 +46,7 @@ impl<T> Receiver<T> {
         // SAFETY: head != tail which means queue is not empty and head has valid initialised
         //         value
         let ret = unsafe { self.ptr.get(self.local_head) };
+        let new_head = self.next_head();
         self.store_head(new_head);
         self.local_head = new_head;
 
@@ -51,8 +58,6 @@ impl<T> Receiver<T> {
     /// This method uses a spin loop to wait for available data in the queue.
     /// For a non-blocking alternative, use [`Receiver::try_recv`].
     pub fn recv(&mut self) -> T {
-        let new_head = (self.local_head + 1) & self.mask;
-
         while self.local_head == self.local_tail {
             hint::spin_loop();
             self.load_tail();
@@ -61,6 +66,7 @@ impl<T> Receiver<T> {
         // SAFETY: head != tail which means queue is not empty and head has valid initialised
         //         value
         let ret = unsafe { self.ptr.get(self.local_head) };
+        let new_head = self.next_head();
         self.store_head(new_head);
         self.local_head = new_head;
 
@@ -92,10 +98,10 @@ impl<T> Receiver<T> {
                 }
             }
 
-            let new_head = (self.local_head + 1) & self.mask;
             // SAFETY: head != tail which means queue is not empty and head has valid initialised
             //         value
             let ret = unsafe { self.ptr.get(self.local_head) };
+            let new_head = self.next_head();
             self.store_head(new_head);
             self.local_head = new_head;
 
@@ -150,7 +156,10 @@ impl<T> Receiver<T> {
     #[inline(always)]
     pub unsafe fn advance(&mut self, len: usize) {
         // the len can be just right at the edge of buffer, so we need to wrap just in case
-        let new_head = (self.local_head + len) & self.mask;
+        let mut new_head = self.local_head + len;
+        if new_head >= self.ptr.capacity {
+            new_head -= self.ptr.capacity;
+        }
         self.store_head(new_head);
         self.local_head = new_head;
     }

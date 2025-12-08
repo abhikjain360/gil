@@ -26,11 +26,11 @@ mod sender;
 
 /// Creates a new single-producer single-consumer (SPSC) queue.
 ///
-/// The queue has a fixed capacity and is lock-free. The capacity is rounded up to the next power of two.
+/// The queue has a fixed capacity and is lock-free.
 ///
 /// # Arguments
 ///
-/// * `capacity` - The minimum capacity of the queue. Will be rounded up to the next power of two.
+/// * `capacity` - The capacity of the queue.
 ///
 /// # Returns
 ///
@@ -45,8 +45,8 @@ mod sender;
 /// let (tx, rx) = channel::<usize>(NonZeroUsize::new(1024).unwrap());
 /// ```
 pub fn channel<T>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
-    let (queue, mask) = QueuePtr::with_capacity(capacity);
-    (Sender::new(queue.clone(), mask), Receiver::new(queue, mask))
+    let queue = QueuePtr::with_capacity(capacity);
+    (Sender::new(queue.clone()), Receiver::new(queue))
 }
 
 #[cfg(all(test, not(feature = "loom")))]

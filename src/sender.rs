@@ -10,16 +10,24 @@ pub struct Sender<T> {
     ptr: QueuePtr<T>,
     local_head: usize,
     local_tail: usize,
-    mask: usize,
 }
 
 impl<T> Sender<T> {
-    pub(crate) fn new(queue_ptr: QueuePtr<T>, mask: usize) -> Self {
+    pub(crate) fn new(queue_ptr: QueuePtr<T>) -> Self {
         Self {
             ptr: queue_ptr,
             local_head: 0,
             local_tail: 0,
-            mask,
+        }
+    }
+
+    #[inline(always)]
+    fn next_tail(&self) -> usize {
+        let next = self.local_tail + 1;
+        if next == self.ptr.capacity {
+            0
+        } else {
+            next
         }
     }
 
@@ -30,7 +38,7 @@ impl<T> Sender<T> {
     /// * `true` if the value was successfully sent.
     /// * `false` if the queue is full.
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
-        let new_tail = (self.local_tail + 1) & self.mask;
+        let new_tail = self.next_tail();
 
         if new_tail == self.local_head {
             self.load_head();
@@ -51,7 +59,7 @@ impl<T> Sender<T> {
     /// This method uses a spin loop to wait for available space in the queue.
     /// For a non-blocking alternative, use [`Sender::try_send`].
     pub fn send(&mut self, value: T) {
-        let new_tail = (self.local_tail + 1) & self.mask;
+        let new_tail = self.next_tail();
 
         while new_tail == self.local_head {
             hint::spin_loop();
@@ -75,7 +83,7 @@ impl<T> Sender<T> {
         let mut value = Some(value);
 
         futures::future::poll_fn(|ctx| {
-            let new_tail = (self.local_tail + 1) & self.mask;
+            let new_tail = self.next_tail();
 
             if new_tail == self.local_head {
                 self.load_head();
@@ -127,7 +135,7 @@ impl<T> Sender<T> {
     /// this and your own data.
     pub fn write_buffer(&mut self) -> &mut [MaybeUninit<T>] {
         let start = self.local_tail;
-        let next = (start + 1) & self.mask;
+        let next = self.next_tail();
 
         if next == self.local_head {
             self.load_head();
@@ -157,7 +165,10 @@ impl<T> Sender<T> {
     #[inline(always)]
     pub unsafe fn commit(&mut self, len: usize) {
         // the len can be just right at the edge of buffer, so we need to wrap just in case
-        let new_tail = (self.local_tail + len) & self.mask;
+        let mut new_tail = self.local_tail + len;
+        if new_tail >= self.ptr.capacity {
+            new_tail -= self.ptr.capacity;
+        }
         self.store_tail(new_tail);
         self.local_tail = new_tail;
     }
