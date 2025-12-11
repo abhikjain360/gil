@@ -24,11 +24,7 @@ impl<T> Sender<T> {
     #[inline(always)]
     fn next_tail(&self) -> usize {
         let next = self.local_tail + 1;
-        if next == self.ptr.capacity {
-            0
-        } else {
-            next
-        }
+        if next == self.ptr.capacity { 0 } else { next }
     }
 
     /// Attempts to send a value into the queue without blocking.
