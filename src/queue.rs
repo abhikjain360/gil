@@ -18,6 +18,16 @@ use crate::{
     padded::Padded,
 };
 
+macro_rules! _field {
+    ($ptr:expr, $($path:tt).+) => {
+        $ptr.byte_add(offset_of!(Queue, $($path).+))
+    };
+
+    ($ptr:expr, $($path:tt).+, $ty:ty) => {
+        $ptr.byte_add(offset_of!(Queue, $($path).+)).cast::<$ty>()
+    };
+}
+
 /// # Invariants
 /// - tail should always point to the place where we can write next to.
 // avoid re-ordering fields
@@ -47,6 +57,8 @@ pub(crate) struct QueuePtr<T> {
 
 impl<T> Clone for QueuePtr<T> {
     fn clone(&self) -> Self {
+        let rc = unsafe { _field!(self.ptr, rc, AtomicUsize).as_ref() };
+        rc.fetch_add(1, Ordering::AcqRel);
         Self {
             ptr: self.ptr,
             buffer: self.buffer,
@@ -54,16 +66,6 @@ impl<T> Clone for QueuePtr<T> {
             _marker: PhantomData,
         }
     }
-}
-
-macro_rules! _field {
-    ($ptr:expr, $($path:tt).+) => {
-        $ptr.byte_add(offset_of!(Queue, $($path).+))
-    };
-
-    ($ptr:expr, $($path:tt).+, $ty:ty) => {
-        $ptr.byte_add(offset_of!(Queue, $($path).+)).cast::<$ty>()
-    };
 }
 
 impl<T> QueuePtr<T> {
@@ -100,7 +102,7 @@ impl<T> QueuePtr<T> {
                 #[cfg(feature = "async")]
                 receiver_waker: Padded::new(AtomicWaker::new()),
 
-                rc: AtomicUsize::new(2),
+                rc: AtomicUsize::new(1),
             });
         };
 
