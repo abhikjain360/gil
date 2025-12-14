@@ -1,5 +1,3 @@
-#[cfg(feature = "async")]
-use std::task::Waker;
 use std::{
     marker::PhantomData,
     mem::{align_of, offset_of, size_of},
@@ -7,11 +5,6 @@ use std::{
     ptr::NonNull,
 };
 
-#[cfg(feature = "async")]
-use futures::task::AtomicWaker;
-
-#[cfg(feature = "async")]
-use crate::atomic::AtomicBool;
 use crate::{
     alloc,
     atomic::{AtomicUsize, Ordering},
@@ -141,7 +134,7 @@ impl<T> Drop for QueuePtr<T> {
             let tail = self.tail().load(Ordering::Relaxed);
 
             if std::mem::needs_drop::<T>() {
-                for idx in tail - self.size..tail {
+                for idx in tail.saturating_sub(self.capacity)..tail {
                     let cell = self.at(idx);
                     if cell.epoch().load(Ordering::Relaxed) == idx.wrapping_add(1) {
                         unsafe { cell.drop_in_place() };

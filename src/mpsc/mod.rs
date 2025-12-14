@@ -66,4 +66,33 @@ mod test {
             tx.try_send(i).unwrap();
         }
     }
+
+    #[test]
+    fn test_drop_full_capacity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct DropCounter(Arc<AtomicUsize>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dropped_count = Arc::new(AtomicUsize::new(0));
+
+        {
+            // Request size 3. Capacity will be 4.
+            let (mut tx, _rx) = channel::<DropCounter>(NonZeroUsize::new(3).unwrap());
+            
+            // Push 4 items.
+            for _ in 0..4 {
+                 tx.send(DropCounter(dropped_count.clone()));
+            }
+        }
+
+        let count = dropped_count.load(Ordering::SeqCst);
+        assert_eq!(count, 4, "Expected 4 items to be dropped, but got {}", count);
+    }
 }

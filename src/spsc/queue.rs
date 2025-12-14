@@ -214,7 +214,7 @@ impl<T> Drop for QueuePtr<T> {
     fn drop(&mut self) {
         let rc = unsafe { _field!(self.ptr, rc, AtomicUsize).as_ref() };
         if rc.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let (layout, _) = Self::layout(self.size);
+            let (layout, _) = Self::layout(self.capacity);
 
             let head = self.head().load(Ordering::Relaxed);
             let tail = self.tail().load(Ordering::Relaxed);
