@@ -1,6 +1,6 @@
 [package]
 name = "gil"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 authors = ["Abhik Jain <abhik@abhikjain.xyz>"]
 description = "A fast single-producer single-consumer queue with sync and async support"
