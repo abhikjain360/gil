@@ -31,4 +31,5 @@ mod cell;
 pub mod mpmc;
 pub mod mpsc;
 mod padded;
+pub mod spmc;
 pub mod spsc;

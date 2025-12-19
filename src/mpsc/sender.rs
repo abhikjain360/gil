@@ -1,5 +1,3 @@
-use std::cmp::Ordering as Cmp;
-
 use crate::{atomic::Ordering, hint, mpsc::queue::QueuePtr, thread};
 
 /// The producer end of the MPSC queue.
@@ -14,7 +12,8 @@ pub struct Sender<T> {
 impl<T> Sender<T> {
     pub(crate) fn new(queue_ptr: QueuePtr<T>) -> Self {
         Self {
-            ptr: queue_ptr, local_tail: 0,
+            ptr: queue_ptr,
+            local_tail: 0,
         }
     }
 
@@ -51,6 +50,8 @@ impl<T> Sender<T> {
     /// * `Ok(())` if the value was successfully sent.
     /// * `Err(value)` if the queue is full, returning the original value.
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
+        use std::cmp::Ordering as Cmp;
+
         let mut spin_count = 0;
 
         let cell = loop {

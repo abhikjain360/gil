@@ -1,9 +1,5 @@
-use crate::{atomic::Ordering, hint, mpmc::queue::QueuePtr, thread};
+use crate::{atomic::Ordering, hint, spmc::queue::QueuePtr, thread};
 
-/// The consumer end of the MPMC queue.
-///
-/// This struct is `Clone` and `Send`. It can be shared across threads by cloning it.
-#[derive(Clone)]
 pub struct Receiver<T> {
     ptr: QueuePtr<T>,
     local_head: usize,
@@ -17,22 +13,18 @@ impl<T> Receiver<T> {
         }
     }
 
-    /// Receives a value from the queue, blocking if necessary.
-    ///
-    /// This method uses a spin loop to wait for available data in the queue.
-    /// For a non-blocking alternative, use [`Receiver::try_recv`].
     pub fn recv(&mut self) -> T {
         let head = self.ptr.head().fetch_add(1, Ordering::Relaxed);
-        let next = head.wrapping_add(1);
-        self.local_head = next;
+        let next_head = head.wrapping_add(1);
 
         let cell = self.ptr.at(head);
         let mut spin_count = 0;
-        while cell.epoch().load(Ordering::Acquire) != next {
+        while cell.epoch().load(Ordering::Acquire) != next_head {
             if spin_count < 128 {
                 hint::spin_loop();
                 spin_count += 1;
             } else {
+                spin_count = 0;
                 thread::yield_now();
             }
         }
@@ -44,28 +36,21 @@ impl<T> Receiver<T> {
         ret
     }
 
-    /// Attempts to receive a value from the queue without blocking.
-    ///
-    /// # Returns
-    ///
-    /// * `Some(value)` if a value is available.
-    /// * `None` if the queue is empty.
     pub fn try_recv(&mut self) -> Option<T> {
         use std::cmp::Ordering as Cmp;
 
         let mut spin_count = 0;
-
         loop {
             let cell = self.ptr.at(self.local_head);
             let epoch = cell.epoch().load(Ordering::Acquire);
-            let next_epoch = self.local_head.wrapping_add(1);
+            let next_head = self.local_head.wrapping_add(1);
 
-            match epoch.cmp(&next_epoch) {
+            match epoch.cmp(&next_head) {
                 Cmp::Less => return None,
                 Cmp::Equal => {
                     match self.ptr.head().compare_exchange_weak(
                         self.local_head,
-                        next_epoch,
+                        next_head,
                         Ordering::Relaxed,
                         Ordering::Relaxed,
                     ) {
@@ -75,7 +60,7 @@ impl<T> Receiver<T> {
                                 self.local_head.wrapping_add(self.ptr.capacity),
                                 Ordering::Release,
                             );
-                            self.local_head = next_epoch;
+                            self.local_head = next_head;
                             return Some(ret);
                         }
                         Err(cur_head) => self.local_head = cur_head,
@@ -85,12 +70,21 @@ impl<T> Receiver<T> {
             }
 
             if spin_count < 16 {
-                crate::hint::spin_loop();
+                hint::spin_loop();
                 spin_count += 1;
             } else {
                 spin_count = 0;
-                crate::thread::yield_now();
+                thread::yield_now();
             }
+        }
+    }
+}
+
+impl<T> Clone for Receiver<T> {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr.clone(),
+            local_head: self.ptr.head().load(Ordering::Relaxed),
         }
     }
 }
