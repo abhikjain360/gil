@@ -27,12 +27,13 @@ macro_rules! _field {
     };
 }
 
+mod backoff;
 mod cell;
 pub mod mpmc;
 pub mod mpsc;
 mod padded;
+pub mod sharded_mpsc;
 pub mod spmc;
 pub mod spsc;
-mod backoff;
 
 pub use backoff::Backoff;

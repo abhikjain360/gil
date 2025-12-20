@@ -149,6 +149,14 @@ impl<T> QueuePtr<T> {
     pub(crate) unsafe fn set(&self, index: usize, value: T) {
         unsafe { self.at(index & self.mask).write(value) }
     }
+
+    /// # Safety
+    /// Modifying the reference count might lead to use-after-free bug, so safety requires that rc
+    /// is same as the number of pointers to Queue at any moment.
+    #[inline(always)]
+    pub(crate) unsafe fn rc(&self) -> &AtomicUsize {
+        unsafe { _field!(Queue, self.ptr, rc, AtomicUsize).as_ref() }
+    }
 }
 
 #[cfg(feature = "async")]

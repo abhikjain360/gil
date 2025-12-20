@@ -40,7 +40,7 @@ fn benchmark(c: &mut Criterion) {
         NonZeroUsize::new(4096).unwrap(),
     ];
 
-    const SENDER_COUNTS: [usize; 2] = [2, 8];
+    const SENDER_COUNTS: [usize; 3] = [1, 2, 8];
 
     // ==================== PUSH LATENCY ====================
     let mut group = make_group(c, "push_latency");
@@ -307,7 +307,7 @@ fn large_queue_benchmark(c: &mut Criterion) {
     let mut group = make_group(c, "large_queue");
 
     const ITERS: usize = 5_000_000;
-    const SENDER_COUNTS: [usize; 2] = [2, 8];
+    const SENDER_COUNTS: [usize; 3] = [1, 2, 8];
 
     group.throughput(Throughput::Elements(ITERS as u64));
 

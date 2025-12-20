@@ -150,7 +150,8 @@ impl<T> Sender<T> {
         {
             let start = self.local_tail & self.ptr.mask;
             let contiguous = self.ptr.capacity - start;
-            let available = contiguous.min(self.ptr.size - self.local_tail.wrapping_sub(self.local_head));
+            let available =
+                contiguous.min(self.ptr.size - self.local_tail.wrapping_sub(self.local_head));
             assert!(
                 len <= available,
                 "advancing ({len}) more than available space ({available})"
