@@ -172,6 +172,25 @@ impl<T> Receiver<T> {
     fn load_tail(&mut self) {
         self.local_tail = self.ptr.tail().load(Ordering::Acquire);
     }
+
+    #[inline(always)]
+    pub(crate) fn refresh_head(&mut self) {
+        self.local_head = self.ptr.head().load(Ordering::Acquire);
+        if self.local_tail < self.local_head {
+            self.local_tail = self.ptr.tail().load(Ordering::Acquire);
+        }
+    }
+
+    /// # Safety
+    /// Caller needs to ensure that only one receiver ever access the the `self.ptr` at any time.
+    #[inline(always)]
+    pub(crate) unsafe fn clone_via_ptr(&self) -> Self {
+        Self {
+            ptr: self.ptr.clone(),
+            local_tail: self.local_tail,
+            local_head: self.local_head,
+        }
+    }
 }
 
 unsafe impl<T: Send> Send for Receiver<T> {}

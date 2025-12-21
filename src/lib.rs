@@ -32,6 +32,7 @@ mod cell;
 pub mod mpmc;
 pub mod mpsc;
 mod padded;
+pub mod sharded_mpmc;
 pub mod sharded_mpsc;
 pub mod spmc;
 pub mod spsc;

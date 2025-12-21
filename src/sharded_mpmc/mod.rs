@@ -5,6 +5,9 @@ use crate::spsc;
 mod receiver;
 mod sender;
 
+pub use receiver::{ReadGuard, Receiver};
+pub use sender::Sender;
+
 pub fn channel<T>(
     max_shards: NonZeroUsize,
     capacity_per_shard: NonZeroUsize,
@@ -69,6 +72,147 @@ mod test {
 
             assert_eq!(sum, (ITER * (ITER - 1)) / 2 * THREADS);
         });
+    }
+
+    #[test]
+    fn multiple_senders_multiple_receivers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        const SENDERS: usize = 4;
+        const RECEIVERS: usize = 4;
+        const MESSAGES: usize = 1000;
+
+        let (tx, rx) = channel(
+            NonZeroUsize::new(SENDERS).unwrap(),
+            NonZeroUsize::new(128).unwrap(),
+        );
+        let total_received = Arc::new(AtomicUsize::new(0));
+        let total_sum = Arc::new(AtomicUsize::new(0));
+
+        thread::scope(|s| {
+            for t in 0..SENDERS - 1 {
+                let mut tx = tx.clone().unwrap();
+                s.spawn(move || {
+                    for i in 0..MESSAGES {
+                        tx.send(t * MESSAGES + i);
+                    }
+                });
+            }
+            let mut tx = tx;
+            s.spawn(move || {
+                for i in 0..MESSAGES {
+                    tx.send((SENDERS - 1) * MESSAGES + i);
+                }
+            });
+
+            for _ in 0..RECEIVERS - 1 {
+                let mut rx = rx.clone().unwrap();
+                let total_received = total_received.clone();
+                let total_sum = total_sum.clone();
+                s.spawn(move || {
+                    for _ in 0..(SENDERS * MESSAGES / RECEIVERS) {
+                        let val = rx.recv();
+                        total_received.fetch_add(1, Ordering::SeqCst);
+                        total_sum.fetch_add(val, Ordering::SeqCst);
+                    }
+                });
+            }
+            let mut rx = rx;
+            let total_received = total_received.clone();
+            let total_sum = total_sum.clone();
+            s.spawn(move || {
+                for _ in 0..(SENDERS * MESSAGES / RECEIVERS) {
+                    let val = rx.recv();
+                    total_received.fetch_add(1, Ordering::SeqCst);
+                    total_sum.fetch_add(val, Ordering::SeqCst);
+                }
+            });
+        });
+
+        assert_eq!(total_received.load(Ordering::SeqCst), SENDERS * MESSAGES);
+        let n = SENDERS * MESSAGES;
+        let expected_sum = n * (n - 1) / 2;
+        assert_eq!(total_sum.load(Ordering::SeqCst), expected_sum);
+    }
+
+    #[test]
+    fn multiple_senders_multiple_receivers_try() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        const SENDERS: usize = 4;
+        const RECEIVERS: usize = 4;
+        const MESSAGES: usize = 1000;
+
+        let (tx, rx) = channel(
+            NonZeroUsize::new(SENDERS).unwrap(),
+            NonZeroUsize::new(128).unwrap(),
+        );
+        let total_received = Arc::new(AtomicUsize::new(0));
+        let total_sum = Arc::new(AtomicUsize::new(0));
+
+        thread::scope(|s| {
+            for t in 0..SENDERS - 1 {
+                let mut tx = tx.clone().unwrap();
+                s.spawn(move || {
+                    for i in 0..MESSAGES {
+                        let mut backoff = crate::Backoff::with_spin_count(1);
+                        while tx.try_send(t * MESSAGES + i).is_err() {
+                            backoff.backoff();
+                        }
+                    }
+                });
+            }
+            let mut tx = tx;
+            s.spawn(move || {
+                let t = SENDERS - 1;
+                for i in 0..MESSAGES {
+                    let mut backoff = crate::Backoff::with_spin_count(1);
+                    while tx.try_send(t * MESSAGES + i).is_err() {
+                        backoff.backoff();
+                    }
+                }
+            });
+
+            for _ in 0..RECEIVERS - 1 {
+                let mut rx = rx.clone().unwrap();
+                let total_received = total_received.clone();
+                let total_sum = total_sum.clone();
+                s.spawn(move || {
+                    let mut count = 0;
+                    let mut backoff = crate::Backoff::with_spin_count(1);
+                    while count < (SENDERS * MESSAGES / RECEIVERS) {
+                        if let Some(val) = rx.try_recv() {
+                            total_received.fetch_add(1, Ordering::SeqCst);
+                            total_sum.fetch_add(val, Ordering::SeqCst);
+                            count += 1;
+                        } else {
+                            backoff.backoff();
+                        }
+                    }
+                });
+            }
+            let mut rx = rx;
+            let total_received = total_received.clone();
+            let total_sum = total_sum.clone();
+            s.spawn(move || {
+                let mut count = 0;
+                let mut backoff = crate::Backoff::with_spin_count(1);
+                while count < (SENDERS * MESSAGES / RECEIVERS) {
+                    if let Some(val) = rx.try_recv() {
+                        total_received.fetch_add(1, Ordering::SeqCst);
+                        total_sum.fetch_add(val, Ordering::SeqCst);
+                        count += 1;
+                    } else {
+                        backoff.backoff();
+                    }
+                }
+            });
+        });
+
+        assert_eq!(total_received.load(Ordering::SeqCst), SENDERS * MESSAGES);
+        let n = SENDERS * MESSAGES;
+        let expected_sum = n * (n - 1) / 2;
+        assert_eq!(total_sum.load(Ordering::SeqCst), expected_sum);
     }
 
     #[test]
@@ -173,12 +317,12 @@ mod test {
             let total_expected = SHARDS * TOTAL_ITEMS_PER_THREAD;
 
             while total_received < total_expected {
-                let buffer = rx.read_buffer();
+                let mut buffer = rx.read_buffer();
                 if buffer.is_empty() {
                     continue;
                 }
 
-                for &value in buffer {
+                for &value in buffer.iter() {
                     let thread_id = value / 10000;
                     let sent_id = value % 10000;
                     assert_eq!(sent_id, received_counts[thread_id]);
@@ -187,7 +331,7 @@ mod test {
                 }
 
                 let count = buffer.len();
-                unsafe { rx.advance(count) };
+                buffer.advance(count);
             }
 
             assert_eq!(total_received, total_expected);

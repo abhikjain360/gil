@@ -5,7 +5,7 @@ use crate::{Backoff, spsc};
 pub struct Receiver<T> {
     receivers: Box<[spsc::Receiver<T>]>,
     max_shards: usize,
-    next_receiver: usize,
+    next_shard: usize,
 }
 
 impl<T> Receiver<T> {
@@ -22,7 +22,7 @@ impl<T> Receiver<T> {
         Self {
             receivers: unsafe { receivers.assume_init() },
             max_shards,
-            next_receiver: 0,
+            next_shard: 0,
         }
     }
 
@@ -37,50 +37,50 @@ impl<T> Receiver<T> {
     }
 
     pub fn try_recv(&mut self) -> Option<T> {
-        let start = self.next_receiver;
+        let start = self.next_shard;
         loop {
-            let ret = self.receivers[self.next_receiver].try_recv();
+            let ret = self.receivers[self.next_shard].try_recv();
 
-            self.next_receiver += 1;
-            if self.next_receiver == self.max_shards {
-                self.next_receiver = 0;
+            self.next_shard += 1;
+            if self.next_shard == self.max_shards {
+                self.next_shard = 0;
             }
 
             if ret.is_some() {
                 return ret;
             }
 
-            if self.next_receiver == start {
+            if self.next_shard == start {
                 return None;
             }
         }
     }
 
     pub fn read_buffer(&mut self) -> &[T] {
-        let start = self.next_receiver;
+        let start = self.next_shard;
         loop {
-            let ret = self.receivers[self.next_receiver].read_buffer();
+            let ret = self.receivers[self.next_shard].read_buffer();
 
-            self.next_receiver += 1;
-            if self.next_receiver == self.max_shards {
-                self.next_receiver = 0;
+            self.next_shard += 1;
+            if self.next_shard == self.max_shards {
+                self.next_shard = 0;
             }
 
             if !ret.is_empty() {
                 return unsafe { std::mem::transmute::<&[T], &[T]>(ret) };
             }
 
-            if self.next_receiver == start {
+            if self.next_shard == start {
                 return &[];
             }
         }
     }
 
     pub unsafe fn advance(&mut self, len: usize) {
-        let prev = if self.next_receiver == 0 {
+        let prev = if self.next_shard == 0 {
             self.max_shards - 1
         } else {
-            self.next_receiver - 1
+            self.next_shard - 1
         };
 
         unsafe { self.receivers[prev].advance(len) };

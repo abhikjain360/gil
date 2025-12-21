@@ -71,10 +71,10 @@ impl<T> QueuePtr<T> {
         let (layout, buffer_offset) = Self::layout(capacity);
 
         // SAFETY: capacity > 0, so layout is non-zero too
-        let ptr = unsafe { alloc::alloc(layout) } as *mut Queue;
-        let Some(ptr) = NonNull::new(ptr) else {
+        let Some(ptr) = NonNull::new(unsafe { alloc::alloc(layout) }) else {
             std::alloc::handle_alloc_error(layout);
         };
+        let ptr = ptr.cast::<Queue>();
 
         // calculate buffer pointer
         // SAFETY: `ptr` is already checked by NonNull::new above, so this is guaranteed to be
@@ -117,7 +117,8 @@ impl<T> QueuePtr<T> {
         let header_layout =
             alloc::Layout::from_size_align(size_of::<Queue>(), align_of::<Queue>()).unwrap();
         let buffer_layout = alloc::Layout::array::<T>(capacity).unwrap();
-        header_layout.extend(buffer_layout).unwrap()
+        let (layout, offset) = header_layout.extend(buffer_layout).unwrap();
+        return (layout.pad_to_align(), offset);
     }
 
     #[inline(always)]
