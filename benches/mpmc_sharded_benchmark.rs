@@ -61,7 +61,7 @@ fn benchmark(c: &mut Criterion) {
 
                         let mut handles = Vec::with_capacity(sender_count);
                         for _ in 0..sender_count - 1 {
-                            let mut tx_clone = tx.clone().unwrap();
+                            let mut tx_clone = tx.try_clone().unwrap();
                             let barrier_clone = Arc::clone(&barrier);
                             handles.push(spawn(move || {
                                 barrier_clone.wait();
@@ -112,7 +112,7 @@ fn benchmark(c: &mut Criterion) {
 
                         let mut handles = Vec::with_capacity(sender_count);
                         for _ in 0..sender_count - 1 {
-                            let mut tx_clone = tx.clone().unwrap();
+                            let mut tx_clone = tx.try_clone().unwrap();
                             let barrier_clone = Arc::clone(&barrier);
                             handles.push(spawn(move || {
                                 barrier_clone.wait();
@@ -163,7 +163,7 @@ fn benchmark(c: &mut Criterion) {
 
                         let mut handles = Vec::with_capacity(sender_count);
                         for _ in 0..sender_count - 1 {
-                            let mut tx_clone = tx.clone().unwrap();
+                            let mut tx_clone = tx.try_clone().unwrap();
                             let barrier_clone = Arc::clone(&barrier);
                             handles.push(spawn(move || {
                                 barrier_clone.wait();
@@ -228,7 +228,7 @@ fn benchmark(c: &mut Criterion) {
                         let mut handles = Vec::with_capacity(sender_count + receiver_count);
 
                         for sender_id in 0..sender_count - 1 {
-                            let mut tx_clone = tx.clone().unwrap();
+                            let mut tx_clone = tx.try_clone().unwrap();
                             handles.push(spawn(move || {
                                 for i in 0..messages_per_sender {
                                     tx_clone.send(black_box(sender_id + i));
@@ -244,7 +244,7 @@ fn benchmark(c: &mut Criterion) {
                         }));
 
                         for _ in 0..receiver_count - 1 {
-                            let mut rx_clone = rx.clone().unwrap();
+                            let mut rx_clone = rx.try_clone().unwrap();
                             handles.push(spawn(move || {
                                 for _ in 0..messages_per_receiver {
                                     black_box(rx_clone.recv());
@@ -274,7 +274,7 @@ fn benchmark(c: &mut Criterion) {
                         let mut handles = Vec::with_capacity(sender_count + receiver_count);
 
                         for _ in 0..sender_count - 1 {
-                            let mut tx_clone = tx.clone().unwrap();
+                            let mut tx_clone = tx.try_clone().unwrap();
                             handles.push(spawn(move || {
                                 let mut sent = 0;
                                 while sent < messages_per_sender {
@@ -315,7 +315,7 @@ fn benchmark(c: &mut Criterion) {
                         }));
 
                         for _ in 0..receiver_count - 1 {
-                            let mut rx_clone = rx.clone().unwrap();
+                            let mut rx_clone = rx.try_clone().unwrap();
                             handles.push(spawn(move || {
                                 let mut received = 0;
                                 while received < messages_per_receiver {
@@ -383,7 +383,7 @@ fn benchmark(c: &mut Criterion) {
                         let mut handles = Vec::with_capacity(sender_count + receiver_count);
 
                         for i in 0..sender_count - 1 {
-                            let mut tx_clone = tx.clone().unwrap();
+                            let mut tx_clone = tx.try_clone().unwrap();
                             handles.push(spawn(move || {
                                 for j in 0..messages_per_sender {
                                     tx_clone.send(black_box(Payload1024::new((i + j) as u8)));
@@ -399,7 +399,7 @@ fn benchmark(c: &mut Criterion) {
                         }));
 
                         for _ in 0..receiver_count - 1 {
-                            let mut rx_clone = rx.clone().unwrap();
+                            let mut rx_clone = rx.try_clone().unwrap();
                             handles.push(spawn(move || {
                                 for _ in 0..messages_per_receiver {
                                     black_box(rx_clone.recv());
@@ -429,7 +429,7 @@ fn benchmark(c: &mut Criterion) {
                         let mut handles = Vec::with_capacity(sender_count + receiver_count);
 
                         for _ in 0..sender_count - 1 {
-                            let mut tx_clone = tx.clone().unwrap();
+                            let mut tx_clone = tx.try_clone().unwrap();
                             handles.push(spawn(move || {
                                 let mut sent = 0;
                                 while sent < messages_per_sender {
@@ -470,7 +470,7 @@ fn benchmark(c: &mut Criterion) {
                         }));
 
                         for _ in 0..receiver_count - 1 {
-                            let mut rx_clone = rx.clone().unwrap();
+                            let mut rx_clone = rx.try_clone().unwrap();
                             handles.push(spawn(move || {
                                 let mut received = 0;
                                 while received < messages_per_receiver {

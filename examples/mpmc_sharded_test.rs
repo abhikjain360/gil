@@ -18,7 +18,7 @@ fn main() {
     // Spawn senders
     let mut sender_handles = Vec::with_capacity(SENDERS);
     for _ in 0..SENDERS - 1 {
-        let mut tx = tx.clone().expect("too many senders for max_shards");
+        let mut tx = tx.try_clone().expect("too many senders for max_shards");
         sender_handles.push(spawn(move || {
             for i in 0..MESSAGES {
                 tx.send(black_box(i));
@@ -35,7 +35,7 @@ fn main() {
     // Spawn receivers
     let mut receiver_handles = Vec::with_capacity(RECEIVERS);
     for _ in 0..RECEIVERS - 1 {
-        let mut rx = rx.clone().expect("too many receivers for max_shards");
+        let mut rx = rx.try_clone().expect("too many receivers for max_shards");
         receiver_handles.push(spawn(move || {
             // Total messages = SENDERS * MESSAGES
             // Each receiver gets roughly (SENDERS * MESSAGES) / RECEIVERS

@@ -14,24 +14,23 @@ type Lock = Padded<AtomicBool>;
 /// When the guard is dropped, the elements are marked as consumed in the channel.
 pub struct ReadGuard<'a, T> {
     receiver: &'a mut Receiver<T>,
-    data: *const [T],
+    data: NonNull<[T]>,
     consumed: usize,
-    shard_idx: usize,
 }
 
 impl<'a, T> std::ops::Deref for ReadGuard<'a, T> {
     type Target = [T];
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.data }
+        unsafe { self.data.as_ref() }
     }
 }
 
 impl<'a, T> Drop for ReadGuard<'a, T> {
     fn drop(&mut self) {
-        let slice = unsafe { &*self.data };
+        let slice = unsafe { self.data.as_ref() };
         if !slice.is_empty() {
             unsafe {
-                self.receiver.advance(self.shard_idx, self.consumed);
+                self.receiver.advance(self.consumed);
             }
         }
     }
@@ -56,20 +55,25 @@ impl<'a, T> ReadGuard<'a, T> {
 pub struct Receiver<T> {
     receivers: Box<[spsc::Receiver<T>]>,
     locks: NonNull<Lock>,
-    num_receivers: NonNull<AtomicUsize>,
+    alive_receivers: NonNull<AtomicUsize>,
+    alive_senders: NonNull<AtomicUsize>,
+    shards: NonNull<spsc::QueuePtr<T>>,
     max_shards: usize,
     next_shard: usize,
 }
 
 impl<T> Receiver<T> {
-    /// # Safety/Warning
-    /// This **does not** clone the shard's QueuePtr, instead reads them.
-    pub(crate) unsafe fn new(shards: NonNull<spsc::QueuePtr<T>>, max_shards: usize) -> Self {
+    pub(crate) fn new(
+        shards: NonNull<spsc::QueuePtr<T>>,
+        max_shards: usize,
+        alive_senders: NonNull<AtomicUsize>,
+        alive_receivers: NonNull<AtomicUsize>,
+    ) -> Self {
         let mut locks = Box::<[Lock]>::new_uninit_slice(max_shards);
         let mut receivers = Box::new_uninit_slice(max_shards);
 
         for i in 0..max_shards {
-            let shard = unsafe { shards.add(i).read() };
+            let shard = unsafe { shards.add(i).as_ref() }.clone();
             receivers[i].write(spsc::Receiver::new(shard));
 
             locks[i].write(Padded::new(AtomicBool::new(false)));
@@ -77,13 +81,16 @@ impl<T> Receiver<T> {
 
         let locks = unsafe { NonNull::new_unchecked(Box::into_raw(locks.assume_init())) }.cast();
 
-        let num_receivers_ptr = Box::into_raw(Box::new(AtomicUsize::new(1)));
-        let num_receivers = unsafe { NonNull::new_unchecked(num_receivers_ptr) };
+        unsafe {
+            alive_receivers.as_ref().fetch_add(1, Ordering::AcqRel);
+        }
 
         Self {
             receivers: unsafe { receivers.assume_init() },
             locks,
-            num_receivers,
+            alive_receivers,
+            alive_senders,
+            shards,
             max_shards,
             next_shard: 0,
         }
@@ -92,8 +99,8 @@ impl<T> Receiver<T> {
     /// Attempts to clone the receiver.
     ///
     /// Returns `Some(Receiver)` if there is an available slot for a new receiver, otherwise returns `None`.
-    pub fn clone(&self) -> Option<Self> {
-        let num_receivers_ref = unsafe { self.num_receivers.as_ref() };
+    pub fn try_clone(&self) -> Option<Self> {
+        let num_receivers_ref = unsafe { self.alive_receivers.as_ref() };
         if num_receivers_ref.fetch_add(1, Ordering::AcqRel) == self.max_shards {
             num_receivers_ref.fetch_sub(1, Ordering::AcqRel);
             return None;
@@ -104,17 +111,14 @@ impl<T> Receiver<T> {
             receivers[i].write(unsafe { self.receivers[i].clone_via_ptr() });
         }
 
-        // Initialize the next_shard to distribute load across shards
-        // This is a simple heuristic to avoid all new receivers hammering shard 0
-        let next_shard =
-            unsafe { self.num_receivers.as_ref() }.load(Ordering::Relaxed) % self.max_shards;
-
         Some(Self {
             receivers: unsafe { receivers.assume_init() },
-            num_receivers: self.num_receivers,
+            alive_receivers: self.alive_receivers,
+            alive_senders: self.alive_senders,
+            shards: self.shards,
             locks: self.locks,
             max_shards: self.max_shards,
-            next_shard,
+            next_shard: 0,
         })
     }
 
@@ -139,17 +143,13 @@ impl<T> Receiver<T> {
         loop {
             let idx = self.next_shard;
 
-            // Optimization: check if the shard is empty before trying to lock
-            // This avoids expensive CAS operations on empty shards
             if !self.receivers[idx].is_empty() && self.try_lock(idx) {
-                // SAFETY: We hold the lock for this shard.
                 self.receivers[idx].refresh_head();
                 let ret = self.receivers[idx].try_recv();
+                unsafe { self.unlock(idx) };
+
                 if let Some(v) = ret {
-                    unsafe { self.unlock(idx) };
                     return Some(v);
-                } else {
-                    unsafe { self.unlock(idx) };
                 }
             }
 
@@ -174,17 +174,14 @@ impl<T> Receiver<T> {
 
             if !self.receivers[idx].is_empty() && self.try_lock(idx) {
                 let receiver_ptr = &mut self.receivers[idx] as *mut spsc::Receiver<T>;
-                // SAFETY: We have &mut self, so accessing the receiver via raw pointer is safe.
-                // We use raw pointer to avoid multiple mutable borrows of self.
                 unsafe { (*receiver_ptr).refresh_head() };
                 let slice = unsafe { (*receiver_ptr).read_buffer() };
 
                 if !slice.is_empty() {
                     return ReadGuard {
                         receiver: self,
-                        data: slice as *const [T],
+                        data: NonNull::from_ref(slice),
                         consumed: 0,
-                        shard_idx: idx,
                     };
                 } else {
                     unsafe { self.unlock(idx) };
@@ -199,18 +196,24 @@ impl<T> Receiver<T> {
             if self.next_shard == start {
                 return ReadGuard {
                     receiver: self,
-                    data: &[] as *const [T],
+                    data: NonNull::from_ref(&[]),
                     consumed: 0,
-                    shard_idx: 0, // Dummy value, won't be used since slice is empty
                 };
             }
         }
     }
 
-    unsafe fn advance(&mut self, shard_idx: usize, len: usize) {
+    /// # Safety
+    ///
+    /// - `self.read_buffer` must've been called before this, and it should've returned a non-empty
+    ///    slice
+    /// - this should be called **only once** after `self.read_buffer` returned a non-empty slice.
+    unsafe fn advance(&mut self, len: usize) {
+        // SAFETY: caller guarantees that read_buffer was called before, and it returned a buffer
+        //         which was NOT empty
         unsafe {
-            self.receivers[shard_idx].advance(len);
-            self.unlock(shard_idx);
+            self.receivers[self.next_shard].advance(len);
+            self.unlock(self.next_shard);
         }
     }
 
@@ -231,20 +234,26 @@ impl<T> Receiver<T> {
     /// that.
     #[inline(always)]
     unsafe fn unlock(&self, shard: usize) {
-        self.shard_lock(shard).store(false, Ordering::Relaxed);
+        self.shard_lock(shard).store(false, Ordering::Release);
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let num_receivers_ref = unsafe { self.num_receivers.as_ref() };
-        if num_receivers_ref.fetch_sub(1, Ordering::AcqRel) == 1 {
-            unsafe {
+        unsafe {
+            let num_receivers_ref = self.alive_receivers.as_ref();
+            if num_receivers_ref.fetch_sub(1, Ordering::AcqRel) == 1 {
                 let slice_ptr = ptr::slice_from_raw_parts_mut(self.locks.as_ptr(), self.max_shards);
-
-                // creating `Box`s so that heap allocation is also freed
-                _ = Box::from_raw(self.num_receivers.as_ptr());
                 _ = Box::from_raw(slice_ptr);
+
+                if self.alive_senders.as_ref().load(Ordering::Acquire) == 0 {
+                    _ = Box::from_raw(self.alive_senders.as_ptr());
+                    _ = Box::from_raw(self.alive_receivers.as_ptr());
+                    _ = Box::from_raw(ptr::slice_from_raw_parts_mut(
+                        self.shards.as_ptr(),
+                        self.max_shards,
+                    ));
+                }
             }
         }
     }

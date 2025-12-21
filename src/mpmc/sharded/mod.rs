@@ -20,9 +20,9 @@
 //!         Operations like `clone()` will fail if all shards are occupied.
 //!     *   **Fairness:** Strict global FIFO ordering is not guaranteed; ordering is preserved only within each shard.
 
-use std::{num::NonZeroUsize, ptr::NonNull};
+use core::{num::NonZeroUsize, ptr::NonNull};
 
-use crate::spsc;
+use crate::{atomic::AtomicUsize, spsc};
 
 mod receiver;
 mod sender;
@@ -59,10 +59,17 @@ pub fn channel<T>(
     // SAFETY: Box::new was valid
     let shards = unsafe { NonNull::new_unchecked(Box::into_raw(shards)).cast() };
 
-    // SAFETY: Sender::init(..) will clone, while Receiver::new(..) will move
-    (sender::Sender::new(shards, max_shards), unsafe {
-        receiver::Receiver::new(shards, max_shards.get())
-    })
+    let (alive_senders, alive_receivers) = unsafe {
+        (
+            NonNull::new_unchecked(Box::into_raw(Box::new(AtomicUsize::new(0)))),
+            NonNull::new_unchecked(Box::into_raw(Box::new(AtomicUsize::new(0)))),
+        )
+    };
+
+    (
+        sender::Sender::new(shards, max_shards, alive_senders, alive_receivers),
+        receiver::Receiver::new(shards, max_shards.get(), alive_senders, alive_receivers),
+    )
 }
 
 #[cfg(all(test, not(feature = "loom")))]
@@ -83,7 +90,7 @@ mod test {
 
         thread::scope(move |scope| {
             for thread_id in 0..THREADS - 1 {
-                let mut tx = tx.clone().unwrap();
+                let mut tx = tx.try_clone().unwrap();
                 scope.spawn(move || {
                     for i in 0..ITER {
                         tx.send((thread_id, i));
@@ -109,7 +116,7 @@ mod test {
     }
 
     #[test]
-    fn multiple_senders_multiple_receivers() {
+    fn multiple_senders_multiple_receivers_blocking() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         const SENDERS: usize = 4;
@@ -125,7 +132,7 @@ mod test {
 
         thread::scope(|s| {
             for t in 0..SENDERS - 1 {
-                let mut tx = tx.clone().unwrap();
+                let mut tx = tx.try_clone().unwrap();
                 s.spawn(move || {
                     for i in 0..MESSAGES {
                         tx.send(t * MESSAGES + i);
@@ -140,7 +147,7 @@ mod test {
             });
 
             for _ in 0..RECEIVERS - 1 {
-                let mut rx = rx.clone().unwrap();
+                let mut rx = rx.try_clone().unwrap();
                 let total_received = total_received.clone();
                 let total_sum = total_sum.clone();
                 s.spawn(move || {
@@ -186,7 +193,7 @@ mod test {
 
         thread::scope(|s| {
             for t in 0..SENDERS - 1 {
-                let mut tx = tx.clone().unwrap();
+                let mut tx = tx.try_clone().unwrap();
                 s.spawn(move || {
                     for i in 0..MESSAGES {
                         let mut backoff = crate::Backoff::with_spin_count(1);
@@ -208,7 +215,7 @@ mod test {
             });
 
             for _ in 0..RECEIVERS - 1 {
-                let mut rx = rx.clone().unwrap();
+                let mut rx = rx.try_clone().unwrap();
                 let total_received = total_received.clone();
                 let total_sum = total_sum.clone();
                 s.spawn(move || {
@@ -317,7 +324,7 @@ mod test {
 
         thread::scope(|scope| {
             for thread_id in 0..SHARDS - 1 {
-                let mut tx = tx.clone().unwrap();
+                let mut tx = tx.try_clone().unwrap();
                 scope.spawn(move || {
                     let mut sent = 0;
                     while sent < TOTAL_ITEMS_PER_THREAD {
