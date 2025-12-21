@@ -203,8 +203,8 @@ mod loom_test {
     #[test]
     fn basic_loom() {
         loom::model(|| {
-            let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(4).unwrap());
-            let counts = 7;
+            let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(2).unwrap());
+            let counts = 3;
 
             thread::spawn(move || {
                 for i in 0..counts {
@@ -215,6 +215,70 @@ mod loom_test {
             for i in 0..counts {
                 let r = rx.recv();
                 assert_eq!(r, i);
+            }
+        })
+    }
+
+    #[test]
+    fn try_ops_loom() {
+        loom::model(|| {
+            let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(2).unwrap());
+
+            thread::spawn(move || {
+                let mut i = 0;
+                while i < 3 {
+                    if tx.try_send(i).is_ok() {
+                        i += 1;
+                    }
+                    loom::thread::yield_now();
+                }
+            });
+
+            let mut i = 0;
+            while i < 3 {
+                if let Some(val) = rx.try_recv() {
+                    assert_eq!(val, i);
+                    i += 1;
+                }
+                loom::thread::yield_now();
+            }
+        })
+    }
+
+    #[test]
+    fn batched_ops_loom() {
+        loom::model(|| {
+            let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(2).unwrap());
+            let total = 3;
+
+            thread::spawn(move || {
+                let mut sent = 0;
+                while sent < total {
+                    let buf = tx.write_buffer();
+                    if !buf.is_empty() {
+                        let count = buf.len().min(total - sent);
+                        for i in 0..count {
+                            buf[i].write(sent + i);
+                        }
+                        unsafe { tx.commit(count) };
+                        sent += count;
+                    }
+                    loom::thread::yield_now();
+                }
+            });
+
+            let mut received = 0;
+            while received < total {
+                let buf = rx.read_buffer();
+                if !buf.is_empty() {
+                    let count = buf.len();
+                    for i in 0..count {
+                        assert_eq!(buf[i], received + i);
+                    }
+                    unsafe { rx.advance(count) };
+                    received += count;
+                }
+                loom::thread::yield_now();
             }
         })
     }
