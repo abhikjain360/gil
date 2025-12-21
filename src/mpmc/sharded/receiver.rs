@@ -42,7 +42,10 @@ impl<'a, T> ReadGuard<'a, T> {
     ///
     /// These elements will be removed from the channel when the guard is dropped.
     pub fn advance(&mut self, len: usize) {
-        debug_assert!(self.consumed + len <= self.len(), "advancing beyond buffer length");
+        debug_assert!(
+            self.consumed + len <= self.len(),
+            "advancing beyond buffer length"
+        );
         self.consumed += len;
     }
 }
@@ -103,8 +106,8 @@ impl<T> Receiver<T> {
 
         // Initialize the next_shard to distribute load across shards
         // This is a simple heuristic to avoid all new receivers hammering shard 0
-        let next_shard = unsafe { self.num_receivers.as_ref() }.load(Ordering::Relaxed)
-            % self.max_shards;
+        let next_shard =
+            unsafe { self.num_receivers.as_ref() }.load(Ordering::Relaxed) % self.max_shards;
 
         Some(Self {
             receivers: unsafe { receivers.assume_init() },

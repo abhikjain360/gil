@@ -110,8 +110,8 @@ mod test {
 
     #[test]
     fn multiple_senders_multiple_receivers() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         const SENDERS: usize = 4;
         const RECEIVERS: usize = 4;
         const MESSAGES: usize = 1000;
@@ -171,8 +171,8 @@ mod test {
 
     #[test]
     fn multiple_senders_multiple_receivers_try() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         const SENDERS: usize = 4;
         const RECEIVERS: usize = 4;
         const MESSAGES: usize = 1000;
