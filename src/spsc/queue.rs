@@ -118,7 +118,7 @@ impl<T> QueuePtr<T> {
             alloc::Layout::from_size_align(size_of::<Queue>(), align_of::<Queue>()).unwrap();
         let buffer_layout = alloc::Layout::array::<T>(capacity).unwrap();
         let (layout, offset) = header_layout.extend(buffer_layout).unwrap();
-        return (layout.pad_to_align(), offset);
+        (layout.pad_to_align(), offset)
     }
 
     #[inline(always)]
