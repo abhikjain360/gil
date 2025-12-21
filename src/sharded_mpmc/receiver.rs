@@ -16,6 +16,7 @@ pub struct ReadGuard<'a, T> {
     receiver: &'a mut Receiver<T>,
     data: *const [T],
     consumed: usize,
+    shard_idx: usize,
 }
 
 impl<'a, T> std::ops::Deref for ReadGuard<'a, T> {
@@ -27,9 +28,10 @@ impl<'a, T> std::ops::Deref for ReadGuard<'a, T> {
 
 impl<'a, T> Drop for ReadGuard<'a, T> {
     fn drop(&mut self) {
-        if self.len() > 0 {
+        let slice = unsafe { &*self.data };
+        if !slice.is_empty() {
             unsafe {
-                self.receiver.advance(self.consumed);
+                self.receiver.advance(self.shard_idx, self.consumed);
             }
         }
     }
@@ -99,12 +101,17 @@ impl<T> Receiver<T> {
             receivers[i].write(unsafe { self.receivers[i].clone_via_ptr() });
         }
 
+        // Initialize the next_shard to distribute load across shards
+        // This is a simple heuristic to avoid all new receivers hammering shard 0
+        let next_shard = unsafe { self.num_receivers.as_ref() }.load(Ordering::Relaxed)
+            % self.max_shards;
+
         Some(Self {
             receivers: unsafe { receivers.assume_init() },
             num_receivers: self.num_receivers,
             locks: self.locks,
             max_shards: self.max_shards,
-            next_shard: 0,
+            next_shard,
         })
     }
 
@@ -128,12 +135,10 @@ impl<T> Receiver<T> {
         let start = self.next_shard;
         loop {
             let idx = self.next_shard;
-            self.next_shard += 1;
-            if self.next_shard == self.max_shards {
-                self.next_shard = 0;
-            }
 
-            if self.try_lock(idx) {
+            // Optimization: check if the shard is empty before trying to lock
+            // This avoids expensive CAS operations on empty shards
+            if !self.receivers[idx].is_empty() && self.try_lock(idx) {
                 // SAFETY: We hold the lock for this shard.
                 self.receivers[idx].refresh_head();
                 let ret = self.receivers[idx].try_recv();
@@ -143,6 +148,11 @@ impl<T> Receiver<T> {
                 } else {
                     unsafe { self.unlock(idx) };
                 }
+            }
+
+            self.next_shard += 1;
+            if self.next_shard == self.max_shards {
+                self.next_shard = 0;
             }
 
             if self.next_shard == start {
@@ -158,12 +168,8 @@ impl<T> Receiver<T> {
         let start = self.next_shard;
         loop {
             let idx = self.next_shard;
-            self.next_shard += 1;
-            if self.next_shard == self.max_shards {
-                self.next_shard = 0;
-            }
 
-            if self.try_lock(idx) {
+            if !self.receivers[idx].is_empty() && self.try_lock(idx) {
                 let receiver_ptr = &mut self.receivers[idx] as *mut spsc::Receiver<T>;
                 // SAFETY: We have &mut self, so accessing the receiver via raw pointer is safe.
                 // We use raw pointer to avoid multiple mutable borrows of self.
@@ -175,10 +181,16 @@ impl<T> Receiver<T> {
                         receiver: self,
                         data: slice as *const [T],
                         consumed: 0,
+                        shard_idx: idx,
                     };
                 } else {
                     unsafe { self.unlock(idx) };
                 }
+            }
+
+            self.next_shard += 1;
+            if self.next_shard == self.max_shards {
+                self.next_shard = 0;
             }
 
             if self.next_shard == start {
@@ -186,21 +198,16 @@ impl<T> Receiver<T> {
                     receiver: self,
                     data: &[] as *const [T],
                     consumed: 0,
+                    shard_idx: 0, // Dummy value, won't be used since slice is empty
                 };
             }
         }
     }
 
-    unsafe fn advance(&mut self, len: usize) {
-        let prev = if self.next_shard == 0 {
-            self.max_shards - 1
-        } else {
-            self.next_shard - 1
-        };
-
+    unsafe fn advance(&mut self, shard_idx: usize, len: usize) {
         unsafe {
-            self.receivers[prev].advance(len);
-            self.unlock(prev);
+            self.receivers[shard_idx].advance(len);
+            self.unlock(shard_idx);
         }
     }
 

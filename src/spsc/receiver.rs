@@ -19,6 +19,15 @@ impl<T> Receiver<T> {
         }
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.local_head == self.local_tail && {
+            // relaxed load is enough as we are only checking for emptiness hint
+            // to avoid expensive locking in sharded implementation
+            let tail = self.ptr.tail().load(Ordering::Relaxed);
+            self.local_head == tail
+        }
+    }
+
     /// Attempts to receive a value from the queue without blocking.
     ///
     /// # Returns

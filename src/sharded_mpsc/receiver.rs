@@ -50,13 +50,13 @@ impl<T> Receiver<T> {
         loop {
             let ret = self.receivers[self.next_shard].try_recv();
 
+            if ret.is_some() {
+                return ret;
+            }
+
             self.next_shard += 1;
             if self.next_shard == self.max_shards {
                 self.next_shard = 0;
-            }
-
-            if ret.is_some() {
-                return ret;
             }
 
             if self.next_shard == start {
@@ -73,13 +73,13 @@ impl<T> Receiver<T> {
         loop {
             let ret = self.receivers[self.next_shard].read_buffer();
 
+            if !ret.is_empty() {
+                return unsafe { std::mem::transmute::<&[T], &[T]>(ret) };
+            }
+
             self.next_shard += 1;
             if self.next_shard == self.max_shards {
                 self.next_shard = 0;
-            }
-
-            if !ret.is_empty() {
-                return unsafe { std::mem::transmute::<&[T], &[T]>(ret) };
             }
 
             if self.next_shard == start {
@@ -95,13 +95,7 @@ impl<T> Receiver<T> {
     /// The caller must ensure that `len` is less than or equal to the length of the slice
     /// returned by the last call to `read_buffer`.
     pub unsafe fn advance(&mut self, len: usize) {
-        let prev = if self.next_shard == 0 {
-            self.max_shards - 1
-        } else {
-            self.next_shard - 1
-        };
-
-        unsafe { self.receivers[prev].advance(len) };
+        unsafe { self.receivers[self.next_shard].advance(len) };
     }
 }
 
