@@ -14,14 +14,15 @@ readme = "README.md"
 exclude = [".lazy.lua", "Cargo.lock", "AGENTS.md", "CLAUDE.md"]
 
 [dependencies]
+atomic-wait = "1.1.0"
 futures = { version = "0.3.31", optional = true, default-features = false }
 loom = { version = "0.7.2", optional = true }
 
 [features]
 default = ["std"]
-loom = ["dep:loom", "std"]
+std = []
 async = ["dep:futures"]
-std = ["futures/std"]
+async-std = ["async", "std", "futures/std"]
 
 [[example]]
 name = "spsc_test"
@@ -32,6 +33,10 @@ required-features = ["async"]
 
 [[bench]]
 name = "spsc_benchmark"
+harness = false
+
+[[bench]]
+name = "spsc_efficiency"
 harness = false
 
 [[bench]]
@@ -55,11 +60,12 @@ name = "mpmc_sharded_benchmark"
 harness = false
 
 [dev-dependencies]
-criterion = { version = "0.8.1", features = [
+criterion = { version = "0.8.2", features = [
     "async",
     "async_futures",
     "real_blackbox",
 ] }
+libc = "0.2.181"
 
 [profile.profiling]
 inherits = "release"
