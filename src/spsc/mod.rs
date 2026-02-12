@@ -104,6 +104,7 @@ mod test {
     use std::num::NonZeroUsize;
 
     use super::*;
+    use crate::read_guard::BatchReader;
     use crate::thread;
 
     #[test]
@@ -242,6 +243,7 @@ mod loom_test {
     use core::num::NonZeroUsize;
 
     use super::*;
+    use crate::read_guard::BatchReader;
     use crate::thread;
 
     #[test]

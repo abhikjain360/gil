@@ -183,6 +183,7 @@ For maximum performance, you can directly access the internal buffer. This allow
 
 ```rust
 use gil::spsc::channel;
+use gil::read_guard::BatchReader;
 use core::ptr;
 use core::num::NonZeroUsize;
 

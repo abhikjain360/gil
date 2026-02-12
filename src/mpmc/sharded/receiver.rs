@@ -3,6 +3,7 @@ use core::ptr::{self, NonNull};
 use crate::{
     Backoff, Box,
     padded::Padded,
+    read_guard::BatchReader,
     spsc::{self, shards::ShardsPtr},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };

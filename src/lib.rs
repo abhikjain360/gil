@@ -55,6 +55,7 @@ pub mod mpmc;
 pub mod mpsc;
 mod padded;
 pub mod queue;
+pub mod read_guard;
 pub mod spmc;
 pub mod spsc;
 

@@ -1,4 +1,4 @@
-use crate::{atomic::Ordering, spsc::queue::QueuePtr};
+use crate::{atomic::Ordering, read_guard::BatchReader, spsc::queue::QueuePtr};
 
 /// The consumer end of the SPSC queue.
 ///
@@ -193,108 +193,6 @@ impl<T> Receiver<T> {
         ret
     }
 
-    /// Returns a slice of the available read buffer in the queue.
-    ///
-    /// This allows reading multiple items directly from the queue's memory (zero-copy),
-    /// bypassing the per-item overhead of [`recv`](Receiver::recv).
-    ///
-    /// After reading from the buffer, you must call [`advance`](Receiver::advance) to
-    /// mark the items as consumed.
-    ///
-    /// The returned slice contains contiguous available items starting from the current head.
-    /// It may not represent *all* available items if the buffer wraps around; call
-    /// `read_buffer` again after advancing to get the next contiguous chunk.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use core::num::NonZeroUsize;
-    /// use gil::spsc::channel;
-    ///
-    /// let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(128).unwrap());
-    ///
-    /// for i in 0..5 {
-    ///     tx.send(i);
-    /// }
-    ///
-    /// let buf = rx.read_buffer();
-    /// assert_eq!(buf.len(), 5);
-    /// assert_eq!(buf[0], 0);
-    /// assert_eq!(buf[4], 4);
-    ///
-    /// let count = buf.len();
-    /// unsafe { rx.advance(count) };
-    /// ```
-    pub fn read_buffer(&mut self) -> &[T] {
-        let mut available = self.local_tail.wrapping_sub(self.local_head);
-
-        if available == 0 {
-            self.load_tail();
-            available = self.local_tail.wrapping_sub(self.local_head);
-        }
-
-        let start = self.local_head & self.ptr.mask;
-        let contiguous = self.ptr.capacity - start;
-        let len = available.min(contiguous);
-
-        unsafe {
-            let ptr = self.ptr.exact_at(start);
-            core::slice::from_raw_parts(ptr.as_ptr(), len)
-        }
-    }
-
-    /// Advances the consumer head by `len` items.
-    ///
-    /// This marks items previously obtained via [`read_buffer`](Receiver::read_buffer)
-    /// as consumed, freeing space for the producer.
-    ///
-    /// # Safety
-    ///
-    /// * `len` must be less than or equal to the length of the slice returned by the
-    ///   most recent call to [`read_buffer`](Receiver::read_buffer).
-    /// * Advancing past the available data results in undefined behavior.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use core::num::NonZeroUsize;
-    /// use gil::spsc::channel;
-    ///
-    /// let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(128).unwrap());
-    ///
-    /// tx.send(10);
-    /// tx.send(20);
-    ///
-    /// let buf = rx.read_buffer();
-    /// assert_eq!(buf, &[10, 20]);
-    /// let len = buf.len();
-    /// unsafe { rx.advance(len) };
-    ///
-    /// // Buffer is now empty
-    /// assert_eq!(rx.try_recv(), None);
-    /// ```
-    #[inline(always)]
-    pub unsafe fn advance(&mut self, len: usize) {
-        #[cfg(debug_assertions)]
-        {
-            let start = self.local_head & self.ptr.mask;
-            let contiguous = self.ptr.capacity - start;
-            let available = contiguous.min(self.local_tail.wrapping_sub(self.local_head));
-            assert!(
-                len <= available,
-                "advancing ({len}) more than available space ({available})"
-            );
-        }
-
-        // the len can be just right at the edge of buffer, so we need to wrap just in case
-        let new_head = self.local_head.wrapping_add(len);
-        self.store_head(new_head);
-        self.local_head = new_head;
-
-        #[cfg(feature = "async")]
-        self.ptr.wake_sender();
-    }
-
     #[inline(always)]
     fn store_head(&self, value: usize) {
         self.ptr.head().store(value, Ordering::Release);
@@ -326,3 +224,114 @@ impl<T> Receiver<T> {
 }
 
 unsafe impl<T: Send> Send for Receiver<T> {}
+
+/// # Safety
+///
+/// The implementation delegates to the queue's atomic head/tail for synchronisation.
+/// `read_buffer` refreshes the cached tail and returns a contiguous slice from
+/// the ring buffer.  `advance` publishes the new head via a `Release` store and
+/// wakes the sender when the `async` feature is enabled.
+unsafe impl<T> BatchReader for Receiver<T> {
+    type Item = T;
+
+    /// Returns a slice of the available read buffer in the queue.
+    ///
+    /// This allows reading multiple items directly from the queue's memory (zero-copy),
+    /// bypassing the per-item overhead of [`recv`](Receiver::recv).
+    ///
+    /// The returned slice contains contiguous available items starting from the current head.
+    /// It may not represent *all* available items if the buffer wraps around; call
+    /// `read_buffer` again after advancing to get the next contiguous chunk.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::num::NonZeroUsize;
+    /// use gil::spsc::channel;
+    /// use gil::read_guard::BatchReader;
+    ///
+    /// let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(128).unwrap());
+    ///
+    /// for i in 0..5 {
+    ///     tx.send(i);
+    /// }
+    ///
+    /// let buf = rx.read_buffer();
+    /// assert_eq!(buf.len(), 5);
+    /// assert_eq!(buf[0], 0);
+    /// assert_eq!(buf[4], 4);
+    ///
+    /// let count = buf.len();
+    /// unsafe { rx.advance(count) };
+    /// ```
+    #[inline]
+    fn read_buffer(&mut self) -> &[T] {
+        let mut available = self.local_tail.wrapping_sub(self.local_head);
+
+        if available == 0 {
+            self.load_tail();
+            available = self.local_tail.wrapping_sub(self.local_head);
+        }
+
+        let start = self.local_head & self.ptr.mask;
+        let contiguous = self.ptr.capacity - start;
+        let len = available.min(contiguous);
+
+        unsafe {
+            let ptr = self.ptr.exact_at(start);
+            core::slice::from_raw_parts(ptr.as_ptr(), len)
+        }
+    }
+
+    /// Advances the consumer head by `n` items.
+    ///
+    /// This marks items previously obtained via [`read_buffer`](BatchReader::read_buffer)
+    /// as consumed, freeing space for the producer.
+    ///
+    /// # Safety
+    ///
+    /// * `n` must be less than or equal to the length of the slice returned by the
+    ///   most recent call to [`read_buffer`](BatchReader::read_buffer).
+    /// * Advancing past the available data results in undefined behavior.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::num::NonZeroUsize;
+    /// use gil::spsc::channel;
+    /// use gil::read_guard::BatchReader;
+    ///
+    /// let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(128).unwrap());
+    ///
+    /// tx.send(10);
+    /// tx.send(20);
+    ///
+    /// let buf = rx.read_buffer();
+    /// assert_eq!(buf, &[10, 20]);
+    /// let len = buf.len();
+    /// unsafe { rx.advance(len) };
+    ///
+    /// // Buffer is now empty
+    /// assert_eq!(rx.try_recv(), None);
+    /// ```
+    #[inline(always)]
+    unsafe fn advance(&mut self, n: usize) {
+        #[cfg(debug_assertions)]
+        {
+            let start = self.local_head & self.ptr.mask;
+            let contiguous = self.ptr.capacity - start;
+            let available = contiguous.min(self.local_tail.wrapping_sub(self.local_head));
+            assert!(
+                n <= available,
+                "advancing ({n}) more than available space ({available})"
+            );
+        }
+
+        let new_head = self.local_head.wrapping_add(n);
+        self.store_head(new_head);
+        self.local_head = new_head;
+
+        #[cfg(feature = "async")]
+        self.ptr.wake_sender();
+    }
+}

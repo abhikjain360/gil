@@ -10,6 +10,7 @@ use std::{
 use criterion::{
     BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
 };
+use gil::read_guard::BatchReader;
 use gil::spsc::channel;
 
 /// A 1024-byte payload for benchmarking large object transfers

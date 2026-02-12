@@ -1,5 +1,6 @@
 use crate::{
     Backoff, Box,
+    read_guard::BatchReader,
     spsc::{self, shards::ShardsPtr},
 };
 
