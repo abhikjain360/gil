@@ -44,6 +44,11 @@ pub unsafe trait BatchReader {
     /// Release held resources (e.g., shard lock).
     ///
     /// Default is a no-op for queue types that don't hold resources.
+    ///
+    /// # Safety
+    ///
+    /// Must only be called after all consumed items have been advanced past
+    /// via [`advance`](BatchReader::advance).
     unsafe fn release(&mut self) {}
 }
 

@@ -36,8 +36,8 @@
 /// }
 /// ```
 pub struct Backoff {
+    max_spin: u32,
     spin_count: u32,
-    current: u32,
 }
 
 impl Backoff {
@@ -54,10 +54,10 @@ impl Backoff {
     /// let backoff = Backoff::with_spin_count(128);
     /// ```
     #[inline(always)]
-    pub fn with_spin_count(spin_count: u32) -> Self {
+    pub fn with_spin_count(max_spin: u32) -> Self {
         Self {
-            spin_count,
-            current: 0,
+            max_spin,
+            spin_count: 0,
         }
     }
 
@@ -75,8 +75,8 @@ impl Backoff {
     /// backoff.set_spin_count(256);
     /// ```
     #[inline(always)]
-    pub fn set_spin_count(&mut self, spin_count: u32) {
-        self.spin_count = spin_count;
+    pub fn set_spin_count(&mut self, max_spin: u32) {
+        self.max_spin = max_spin;
     }
 
     /// Performs one backoff step.
@@ -98,11 +98,11 @@ impl Backoff {
     /// ```
     #[inline(always)]
     pub fn backoff(&mut self) {
-        if self.current < self.spin_count {
+        if self.spin_count < self.max_spin {
             crate::hint::spin_loop();
-            self.current += 1;
+            self.spin_count += 1;
         } else {
-            self.current = 0;
+            self.spin_count = 0;
             crate::thread::yield_now();
         }
     }
@@ -127,6 +127,85 @@ impl Backoff {
     /// ```
     #[inline(always)]
     pub fn reset(&mut self) {
-        self.current = 0;
+        self.spin_count = 0;
+    }
+}
+
+/// A three-phase backoff strategy used by the parking queue variants.
+///
+/// This backoff progresses through three phases before signalling the caller
+/// to park:
+///
+/// 1. **Spin** — calls [`core::hint::spin_loop`] up to `max_spin` times.
+/// 2. **Yield** — calls [`std::thread::yield_now`] (or `spin_loop` in `no_std`)
+///    up to `max_yield` times, resetting the spin counter each time.
+/// 3. **Park** — once both budgets are exhausted, [`backoff`](ParkingBackoff::backoff)
+///    returns `true` on every subsequent call, indicating the caller should park
+///    on a futex or other blocking primitive.
+///
+/// This is used internally by [`spsc::parking`](crate::spsc::parking) to decide
+/// when to transition from spinning to futex-based sleeping.
+///
+/// # Examples
+///
+/// ```
+/// use gil::ParkingBackoff;
+///
+/// let mut backoff = ParkingBackoff::new(4, 2);
+///
+/// // First 4 calls spin (returns false)
+/// for _ in 0..4 {
+///     assert!(!backoff.backoff());
+/// }
+///
+/// // Next 2 × (4+1) calls yield then spin (returns false)
+/// // After that, returns true forever
+/// loop {
+///     if backoff.backoff() {
+///         // Time to park on a futex
+///         break;
+///     }
+/// }
+/// ```
+pub struct ParkingBackoff {
+    max_yield: u32,
+    yield_count: u32,
+    max_spin: u32,
+    spin_count: u32,
+}
+
+impl ParkingBackoff {
+    /// Creates a new `ParkingBackoff` with the given spin and yield budgets.
+    ///
+    /// * `max_spin` — number of [`spin_loop`](core::hint::spin_loop) iterations
+    ///   per spin phase.
+    /// * `max_yield` — number of yield phases before the backoff signals to park.
+    pub fn new(max_spin: u32, max_yield: u32) -> Self {
+        Self {
+            max_yield,
+            yield_count: 0,
+            max_spin,
+            spin_count: 0,
+        }
+    }
+
+    /// Performs one backoff step, returning `true` when the caller should park.
+    ///
+    /// Returns `false` while still in the spin or yield phases, and `true`
+    /// once both budgets are exhausted (and on every subsequent call).
+    #[inline(always)]
+    pub fn backoff(&mut self) -> bool {
+        if self.spin_count < self.max_spin {
+            crate::hint::spin_loop();
+            self.spin_count += 1;
+        } else if self.yield_count < self.max_yield {
+            crate::thread::yield_now();
+            self.spin_count = 0;
+            self.yield_count += 1;
+        } else {
+            return true;
+        }
+
+        false
     }
 }

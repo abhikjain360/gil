@@ -1,14 +1,20 @@
-//! Single-producer single-consumer (SPSC) queue.
+//! Parking variant of the SPSC queue.
 //!
-//! This is the fastest queue variant, as it requires no atomic synchronization for the data buffer itself,
-//! only for the head and tail indices. It is inspired by the `ProducerConsumerQueue` in Facebook's Folly library.
+//! This module provides a single-producer single-consumer queue that uses
+//! futex-based parking instead of pure spin-waiting. After a short spin phase
+//! and a yield phase, blocked threads park via [`atomic_wait`] and are woken by
+//! the other side, freeing the CPU for other work.
+//!
+//! Use this variant when latency spikes from idle spinning are unacceptable, or
+//! when the producer and consumer may be idle for extended periods. For the
+//! lowest-latency spin-only variant, see [`spsc::channel`](super::channel).
 //!
 //! # Examples
 //!
 //! ```
 //! use std::thread;
 //! use core::num::NonZeroUsize;
-//! use gil::spsc::channel;
+//! use gil::spsc::parking::channel;
 //!
 //! let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(1024).unwrap());
 //!
@@ -23,67 +29,40 @@
 //! }
 //! ```
 //!
-//! ## Async
-//!
-//! Async support is available with the `async` feature flag. See [`Sender::send_async`]
-//! and [`Receiver::recv_async`].
-//!
-//! ```rust,ignore
-//! use core::num::NonZeroUsize;
-//! use gil::spsc::channel;
-//!
-//! // In an async context:
-//! let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(1024).unwrap());
-//! tx.send_async(42).await;
-//! let value = rx.recv_async().await;
-//! assert_eq!(value, 42);
-//! ```
-//!
 //! # Performance
 //!
-//! **Improvements over original inspiration:**
-//! - **Single Allocation:** The queue metadata (head/tail indices) and the data buffer are allocated
-//!   in a single contiguous memory block. This reduces cache misses by keeping related data close in memory.
-//! - **False Sharing Prevention:** The head and tail indices are explicitly padded to separate cache lines
-//!   to prevent false sharing between the producer and consumer cores.
+//! The blocking strategy is a three-phase backoff controlled by
+//! [`ParkingBackoff`](crate::ParkingBackoff):
+//!
+//! 1. **Spin** — a configurable number of [`spin_loop`](core::hint::spin_loop) hints.
+//! 2. **Yield** — a configurable number of [`yield_now`](std::thread::yield_now) calls.
+//! 3. **Park** — the thread parks on a futex and is woken by the other side.
+//!
+//! Because the queue shares a single futex between sender and receiver, at most
+//! one side can be parked at any time. This is sufficient for SPSC since the
+//! queue cannot be simultaneously full (sender waits) and empty (receiver waits).
 //!
 //! # When to use
 //!
-//! Use this queue for 1-to-1 thread communication. It offers the best possible throughput and latency.
-//!
-//! # Variants
-//!
-//! - **Spin-only** ([`channel`]) — the default. Uses a spin loop with configurable
-//!   spin count. Lowest latency when both threads are active.
-//! - **Parking** ([`parking::channel`]) — after a short spin and yield phase,
-//!   parks the blocked thread on a futex and wakes it from the other side. Better
-//!   CPU efficiency when threads may be idle for extended periods.
+//! Use this queue for 1-to-1 thread communication where threads may be idle for
+//! long periods or where CPU usage from spinning is a concern.
 //!
 //! # Gotchas
 //!
-//! - **Not Cloneable:** Neither [`Sender`] nor [`Receiver`] implement `Clone`. They are `Send` but not
-//!   `Sync`, so they can be moved to another thread but not shared.
-//! - **Async Support:** This is the only queue variant with async support (`send_async`/`recv_async`).
-//!   Enable the `async` feature to use it.
+//! - **Not Cloneable:** Neither [`Sender`] nor [`Receiver`] implement `Clone`. They are `Send` but
+//!   not `Sync`, so they can be moved to another thread but not shared.
 //! - **Batch Operations:** Use [`Sender::write_buffer`]/[`Sender::commit`] and
 //!   [`Receiver::read_buffer`]/[`Receiver::advance`] for zero-copy batch operations.
-//!
-//! # Reference
-//!
-//! * [Facebook Folly ProducerConsumerQueue](https://github.com/facebook/folly/blob/main/folly/ProducerConsumerQueue.h)
 
 use core::num::NonZeroUsize;
 
-pub(crate) use self::queue::QueuePtr;
-pub(crate) mod shards;
 pub use self::{receiver::Receiver, sender::Sender};
 
-pub mod parking;
 mod queue;
 mod receiver;
 mod sender;
 
-/// Creates a new single-producer single-consumer (SPSC) queue.
+/// Creates a new parking single-producer single-consumer (SPSC) queue.
 ///
 /// See the [module-level documentation](self) for more details on performance and usage.
 ///
@@ -99,7 +78,7 @@ mod sender;
 ///
 /// ```
 /// use core::num::NonZeroUsize;
-/// use gil::spsc::channel;
+/// use gil::spsc::parking::channel;
 ///
 /// let (tx, rx) = channel::<usize>(NonZeroUsize::new(1024).unwrap());
 /// ```
@@ -150,26 +129,6 @@ mod test {
         for i in 0..4 {
             tx.try_send(i).unwrap();
         }
-    }
-
-    #[cfg(feature = "async")]
-    #[test]
-    fn test_async_send() {
-        futures::executor::block_on(async {
-            const COUNTS: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
-
-            let (mut tx, mut rx) = channel::<usize>(COUNTS);
-
-            thread::spawn(move || {
-                for i in 0..COUNTS.get() << 1 {
-                    futures::executor::block_on(tx.send_async(i));
-                }
-                drop(tx);
-            });
-            for i in 0..COUNTS.get() << 1 {
-                assert_eq!(rx.recv_async().await, i);
-            }
-        });
     }
 
     #[test]
@@ -231,17 +190,14 @@ mod test {
         {
             let (mut tx, rx) = channel::<DropCounter>(NonZeroUsize::new(16).unwrap());
 
-            // Send 5 items but don't receive them
             for _ in 0..5 {
                 tx.send(DropCounter);
             }
 
-            // Drop both ends - remaining items should be dropped
             drop(tx);
             drop(rx);
         }
 
-        // All 5 items should have been dropped
         assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 5);
     }
 }

@@ -59,5 +59,5 @@ pub mod read_guard;
 pub mod spmc;
 pub mod spsc;
 
-pub use backoff::Backoff;
+pub use backoff::*;
 pub(crate) use queue::*;
