@@ -74,7 +74,7 @@ impl<T> QueuePtr<T> {
             .compare_exchange(
                 FutexState::None as u32,
                 futex_state as u32,
-                Ordering::Release,
+                Ordering::Acquire,
                 Ordering::Relaxed,
             )
             .is_ok()
@@ -87,9 +87,9 @@ impl<T> QueuePtr<T> {
 
     #[inline(always)]
     pub(super) fn futex_wake(&self) {
-        if self.futex().load(Ordering::Acquire) != FutexState::None as u32 {
+        if self.futex().load(Ordering::SeqCst) != FutexState::None as u32 {
             self.futex()
-                .store(FutexState::None as u32, Ordering::Release);
+                .store(FutexState::None as u32, Ordering::Relaxed);
             atomic_wait::wake_one(self.futex())
         }
     }
