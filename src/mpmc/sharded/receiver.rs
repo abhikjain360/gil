@@ -10,92 +10,6 @@ use crate::{
 
 type Lock = Padded<AtomicBool>;
 
-/// A guard that provides read access to a batch of elements from the channel.
-///
-/// When the guard is dropped, the elements are marked as consumed in the channel.
-/// Use [`advance`](ReadGuard::advance) to mark specific elements as consumed before dropping.
-///
-/// # Examples
-///
-/// ```
-/// use core::num::NonZeroUsize;
-/// use gil::mpmc::sharded::channel;
-///
-/// let (mut tx, mut rx) = channel::<usize>(
-///     NonZeroUsize::new(1).unwrap(),
-///     NonZeroUsize::new(128).unwrap(),
-/// );
-///
-/// tx.send(10);
-/// tx.send(20);
-///
-/// let mut guard = rx.read_buffer();
-/// assert_eq!(guard.len(), 2);
-/// assert_eq!(guard[0], 10);
-/// guard.advance(guard.len());
-/// // Elements are consumed when the guard is dropped
-/// ```
-pub struct ReadGuard<'a, T> {
-    receiver: &'a mut Receiver<T>,
-    data: NonNull<[T]>,
-    consumed: usize,
-}
-
-impl<'a, T> core::ops::Deref for ReadGuard<'a, T> {
-    type Target = [T];
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.data.as_ref() }
-    }
-}
-
-impl<'a, T> Drop for ReadGuard<'a, T> {
-    fn drop(&mut self) {
-        let slice = unsafe { self.data.as_ref() };
-        if !slice.is_empty() {
-            unsafe {
-                self.receiver.advance(self.consumed);
-            }
-        }
-    }
-}
-
-impl<'a, T> ReadGuard<'a, T> {
-    /// Marks `len` elements as consumed.
-    ///
-    /// These elements will be removed from the channel when the guard is dropped.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use core::num::NonZeroUsize;
-    /// use gil::mpmc::sharded::channel;
-    ///
-    /// let (mut tx, mut rx) = channel::<usize>(
-    ///     NonZeroUsize::new(1).unwrap(),
-    ///     NonZeroUsize::new(128).unwrap(),
-    /// );
-    ///
-    /// tx.send(1);
-    /// tx.send(2);
-    /// tx.send(3);
-    ///
-    /// let mut guard = rx.read_buffer();
-    /// // Only consume the first 2 elements
-    /// guard.advance(2);
-    /// drop(guard);
-    ///
-    /// // Third element is still available
-    /// assert_eq!(rx.recv(), 3);
-    /// ```
-    pub fn advance(&mut self, len: usize) {
-        debug_assert!(
-            self.consumed + len <= self.len(),
-            "advancing beyond buffer length"
-        );
-        self.consumed += len;
-    }
-}
-
 /// The receiving half of a sharded MPMC channel.
 ///
 /// The receiver polls shards in round-robin fashion, returning the first available item.
@@ -294,10 +208,12 @@ impl<T> Receiver<T> {
         }
     }
 
-    /// Returns a [`ReadGuard`] providing read access to a batch of elements from the channel.
+    /// Returns a [`ReadGuard`](crate::read_guard::ReadGuard) providing read
+    /// access to a batch of elements from the channel.
     ///
-    /// If no elements are available, an empty [`ReadGuard`] is returned. Use
-    /// [`ReadGuard::advance`] to mark elements as consumed before dropping the guard.
+    /// The guard holds a shard lock internally. The lock is released when the
+    /// guard is dropped. If no elements are available, an empty guard is
+    /// returned (no lock held).
     ///
     /// # Examples
     ///
@@ -313,62 +229,16 @@ impl<T> Receiver<T> {
     /// tx.send(10);
     /// tx.send(20);
     ///
-    /// let mut guard = rx.read_buffer();
-    /// assert_eq!(guard[0], 10);
-    /// assert_eq!(guard[1], 20);
+    /// let mut guard = rx.read_guard();
+    /// assert_eq!(guard.as_slice()[0], 10);
+    /// assert_eq!(guard.as_slice()[1], 20);
     /// guard.advance(guard.len());
     /// drop(guard);
     ///
     /// assert_eq!(rx.try_recv(), None);
     /// ```
-    pub fn read_buffer(&mut self) -> ReadGuard<'_, T> {
-        let start = self.next_shard;
-        loop {
-            let idx = self.next_shard;
-
-            if !self.receivers[idx].is_empty() && self.try_lock(idx) {
-                let receiver_ptr = &mut self.receivers[idx] as *mut spsc::Receiver<T>;
-                unsafe { (*receiver_ptr).refresh_head() };
-                let slice = unsafe { (*receiver_ptr).read_buffer() };
-
-                if !slice.is_empty() {
-                    return ReadGuard {
-                        receiver: self,
-                        data: NonNull::from_ref(slice),
-                        consumed: 0,
-                    };
-                } else {
-                    unsafe { self.unlock(idx) };
-                }
-            }
-
-            self.next_shard += 1;
-            if self.next_shard == self.max_shards {
-                self.next_shard = 0;
-            }
-
-            if self.next_shard == start {
-                return ReadGuard {
-                    receiver: self,
-                    data: NonNull::from_ref(&[]),
-                    consumed: 0,
-                };
-            }
-        }
-    }
-
-    /// # Safety
-    ///
-    /// - `self.read_buffer` must've been called before this, and it should've returned a non-empty
-    ///   slice
-    /// - this should be called **only once** after `self.read_buffer` returned a non-empty slice.
-    unsafe fn advance(&mut self, len: usize) {
-        // SAFETY: caller guarantees that read_buffer was called before, and it returned a buffer
-        //         which was NOT empty
-        unsafe {
-            self.receivers[self.next_shard].advance(len);
-            self.unlock(self.next_shard);
-        }
+    pub fn read_guard(&mut self) -> crate::read_guard::ReadGuard<'_, Self> {
+        crate::read_guard::ReadGuard::new(self)
     }
 
     #[inline(always)]
@@ -389,6 +259,98 @@ impl<T> Receiver<T> {
     #[inline(always)]
     unsafe fn unlock(&self, shard: usize) {
         self.shard_lock(shard).store(false, Ordering::Release);
+    }
+}
+
+/// # Safety
+///
+/// The implementation locks a shard spinlock in [`read_buffer`](BatchReader::read_buffer)
+/// and releases it in [`release`](BatchReader::release). Between these two
+/// calls, no other receiver can access the locked shard.
+///
+/// Items are returned by shared reference — ownership is **not** transferred.
+/// See [`BatchReader`](crate::read_guard::BatchReader#ownership) for details.
+unsafe impl<T> BatchReader for Receiver<T> {
+    type Item = T;
+
+    /// Returns a slice of available items from a locked shard.
+    ///
+    /// Acquires a shard spinlock internally. The lock is released by
+    /// [`release`](BatchReader::release) (called automatically by
+    /// [`ReadGuard`](crate::read_guard::ReadGuard) on drop).
+    ///
+    /// If no items are available, returns an empty slice (no lock held).
+    ///
+    /// Items are returned by shared reference — ownership is **not**
+    /// transferred. See [`BatchReader`](crate::read_guard::BatchReader#ownership).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::num::NonZeroUsize;
+    /// use gil::mpmc::sharded::channel;
+    /// use gil::read_guard::BatchReader;
+    ///
+    /// let (mut tx, mut rx) = channel::<usize>(
+    ///     NonZeroUsize::new(1).unwrap(),
+    ///     NonZeroUsize::new(128).unwrap(),
+    /// );
+    ///
+    /// tx.send(10);
+    /// tx.send(20);
+    ///
+    /// let buf = rx.read_buffer();
+    /// assert_eq!(buf[0], 10);
+    /// assert_eq!(buf[1], 20);
+    /// let count = buf.len();
+    /// unsafe {
+    ///     rx.advance(count);
+    ///     rx.release();
+    /// };
+    ///
+    /// assert_eq!(rx.try_recv(), None);
+    /// ```
+    fn read_buffer(&mut self) -> &[T] {
+        let start = self.next_shard;
+        loop {
+            let idx = self.next_shard;
+
+            if !self.receivers[idx].is_empty() && self.try_lock(idx) {
+                let receiver_ptr = &mut self.receivers[idx] as *mut spsc::Receiver<T>;
+                unsafe { (*receiver_ptr).refresh_head() };
+                let ret = unsafe { (*receiver_ptr).read_buffer() };
+
+                if !ret.is_empty() {
+                    return unsafe { core::mem::transmute::<&[T], &[T]>(ret) };
+                } else {
+                    unsafe { self.unlock(idx) };
+                }
+            }
+
+            self.next_shard += 1;
+            if self.next_shard == self.max_shards {
+                self.next_shard = 0;
+            }
+
+            if self.next_shard == start {
+                return &[];
+            }
+        }
+    }
+
+    unsafe fn advance(&mut self, n: usize) {
+        unsafe { self.receivers[self.next_shard].advance(n) };
+    }
+
+    /// Releases the shard spinlock acquired by
+    /// [`read_buffer`](BatchReader::read_buffer).
+    ///
+    /// # Safety
+    ///
+    /// Must only be called after [`read_buffer`](BatchReader::read_buffer)
+    /// returned a **non-empty** slice (i.e., a lock is held).
+    unsafe fn release(&mut self) {
+        unsafe { self.unlock(self.next_shard) };
     }
 }
 

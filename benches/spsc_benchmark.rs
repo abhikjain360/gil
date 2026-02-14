@@ -10,7 +10,6 @@ use std::{
 use criterion::{
     BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
 };
-use gil::read_guard::BatchReader;
 use gil::spsc::channel;
 
 /// A 1024-byte payload for benchmarking large object transfers
@@ -231,16 +230,16 @@ fn benchmark(c: &mut Criterion) {
                     spawn(move || {
                         let mut received = 0;
                         while received < ELEMENTS {
-                            let buf = rx.read_buffer();
-                            let len = buf.len();
+                            let mut guard = rx.read_guard();
+                            let len = guard.len();
                             if len == 0 {
                                 spin_loop();
                                 continue;
                             }
 
-                            black_box(buf[0]);
+                            black_box(guard.as_slice()[0]);
 
-                            unsafe { rx.advance(len) };
+                            guard.advance(len);
                             received += len;
                         }
                     });
@@ -306,16 +305,16 @@ fn benchmark(c: &mut Criterion) {
                     spawn(move || {
                         let mut received = 0;
                         while received < ELEMENTS {
-                            let buf = rx.read_buffer();
-                            let len = buf.len();
+                            let mut guard = rx.read_guard();
+                            let len = guard.len();
                             if len == 0 {
                                 spin_loop();
                                 continue;
                             }
 
-                            black_box(buf[0]);
+                            black_box(guard.as_slice()[0]);
 
-                            unsafe { rx.advance(len) };
+                            guard.advance(len);
                             received += len;
                         }
                     });
@@ -383,16 +382,16 @@ fn benchmark(c: &mut Criterion) {
                     spawn(move || {
                         let mut received = 0;
                         while received < LARGE_ELEMENTS {
-                            let buf = rx.read_buffer();
-                            let len = buf.len();
+                            let mut guard = rx.read_guard();
+                            let len = guard.len();
                             if len == 0 {
                                 spin_loop();
                                 continue;
                             }
 
-                            black_box(buf[0]);
+                            black_box(guard.as_slice()[0]);
 
-                            unsafe { rx.advance(len) };
+                            guard.advance(len);
                             received += len;
                         }
                     });

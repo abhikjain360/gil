@@ -183,7 +183,6 @@ For maximum performance, you can directly access the internal buffer. This allow
 
 ```rust
 use gil::spsc::channel;
-use gil::read_guard::BatchReader;
 use core::ptr;
 use core::num::NonZeroUsize;
 
@@ -204,16 +203,13 @@ unsafe {
     tx.commit(count);
 }
 
-// Zero-copy read
-let len = {
-    let slice = rx.read_buffer();
-    for &value in slice {
-        println!("Value: {}", value);
-    }
-    slice.len()
-};
-// Advance the consumer head to mark items as processed
-unsafe { rx.advance(len); }
+// Zero-copy read via ReadGuard
+let mut guard = rx.read_guard();
+for &value in guard.as_slice() {
+    println!("Value: {}", value);
+}
+// Mark all items as consumed; head is published on drop
+guard.advance(guard.len());
 ```
 
 ## Performance

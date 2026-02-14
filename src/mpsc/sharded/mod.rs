@@ -249,12 +249,12 @@ mod test {
             let total_expected = SHARDS * TOTAL_ITEMS_PER_THREAD;
 
             while total_received < total_expected {
-                let buffer = rx.read_buffer();
-                if buffer.is_empty() {
+                let mut guard = rx.read_guard();
+                if guard.is_empty() {
                     continue;
                 }
 
-                for &value in buffer {
+                for &value in guard.as_slice() {
                     let thread_id = value / 10000;
                     let sent_id = value % 10000;
                     assert_eq!(sent_id, received_counts[thread_id]);
@@ -262,8 +262,8 @@ mod test {
                     total_received += 1;
                 }
 
-                let count = buffer.len();
-                unsafe { rx.advance(count) };
+                let count = guard.len();
+                guard.advance(count);
             }
 
             assert_eq!(total_received, total_expected);

@@ -48,11 +48,11 @@
 //! - **Fallible Clone:** `Sender::try_clone()` and `Receiver::try_clone()` return `Option`. They return
 //!   `None` if all shards are already occupied. Always handle this case in production code.
 //! - **Power of Two:** `max_shards` must be a power of two.
-//! - **ReadGuard Locking:** `Receiver::read_buffer()` returns a [`ReadGuard`] that holds an internal lock
-//!   on the shard. The lock is released when the guard is dropped. Holding the guard for too long will
-//!   block other receivers from accessing that shard.
-//! - **Batch Operations:** This variant supports batch operations. Use `ReadGuard::advance()` to mark
-//!   items as consumed before dropping the guard.
+//! - **ReadGuard Locking:** `Receiver::read_guard()` returns a [`ReadGuard`](crate::read_guard::ReadGuard)
+//!   that holds an internal shard lock. The lock is released when the guard is dropped. Holding the
+//!   guard for too long will block other receivers from accessing that shard.
+//! - **Batch Operations:** This variant supports batch operations via the
+//!   [`BatchReader`](crate::read_guard::BatchReader) trait.
 
 use core::num::NonZeroUsize;
 
@@ -60,7 +60,7 @@ mod receiver;
 mod sender;
 use crate::spsc::shards::ShardsPtr;
 
-pub use receiver::{ReadGuard, Receiver};
+pub use receiver::Receiver;
 pub use sender::Sender;
 
 /// Creates a new sharded multi-producer multi-consumer channel.
@@ -392,12 +392,12 @@ mod test {
             let total_expected = SHARDS * TOTAL_ITEMS_PER_THREAD;
 
             while total_received < total_expected {
-                let mut buffer = rx.read_buffer();
-                if buffer.is_empty() {
+                let mut guard = rx.read_guard();
+                if guard.is_empty() {
                     continue;
                 }
 
-                for &value in buffer.iter() {
+                for &value in guard.as_slice() {
                     let thread_id = value / 10000;
                     let sent_id = value % 10000;
                     assert_eq!(sent_id, received_counts[thread_id]);
@@ -405,8 +405,8 @@ mod test {
                     total_received += 1;
                 }
 
-                let count = buffer.len();
-                buffer.advance(count);
+                let count = guard.len();
+                guard.advance(count);
             }
 
             assert_eq!(total_received, total_expected);

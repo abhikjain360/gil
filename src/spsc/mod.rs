@@ -104,7 +104,6 @@ mod test {
     use std::num::NonZeroUsize;
 
     use super::*;
-    use crate::read_guard::BatchReader;
     use crate::thread;
 
     #[test]
@@ -187,16 +186,16 @@ mod test {
         let mut expected = 0;
 
         while received < TOTAL_ITEMS {
-            let buffer = rx.read_buffer();
-            if buffer.is_empty() {
+            let mut guard = rx.read_guard();
+            if guard.is_empty() {
                 continue;
             }
-            for &value in buffer.iter() {
+            for &value in guard.as_slice() {
                 assert_eq!(value, expected);
                 expected += 1;
             }
-            let count = buffer.len();
-            unsafe { rx.advance(count) };
+            let count = guard.len();
+            guard.advance(count);
             received += count;
         }
 
@@ -243,7 +242,6 @@ mod loom_test {
     use core::num::NonZeroUsize;
 
     use super::*;
-    use crate::read_guard::BatchReader;
     use crate::thread;
 
     #[test]
@@ -315,13 +313,13 @@ mod loom_test {
 
             let mut received = 0;
             while received < total {
-                let buf = rx.read_buffer();
-                if !buf.is_empty() {
-                    let count = buf.len();
-                    for (i, item) in buf.iter().take(count).enumerate() {
+                let mut guard = rx.read_guard();
+                if !guard.is_empty() {
+                    let count = guard.len();
+                    for (i, item) in guard.as_slice().iter().enumerate() {
                         assert_eq!(*item, received + i);
                     }
-                    unsafe { rx.advance(count) };
+                    guard.advance(count);
                     received += count;
                 }
                 loom::thread::yield_now();

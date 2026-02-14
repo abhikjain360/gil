@@ -12,13 +12,29 @@ use alloc_crate::vec::Vec;
 /// - `advance` publishes the new head to the producer (atomic store + wake)
 /// - `release` releases any held resources (e.g., shard locks),
 ///   and is a no-op when no resources are held
+///
+/// # Ownership
+///
+/// Items are returned by **shared reference** — ownership is not transferred
+/// to the caller. [`advance`](BatchReader::advance) makes slots reusable by
+/// the producer but does **not** drop the previous values. For types that
+/// implement [`Drop`], use [`ReadGuard::drain_into`] or the [`ReadGuard`]
+/// [iterator](ReadGuard#impl-Iterator) to take ownership; plain
+/// [`ReadGuard::as_slice`] combined with [`ReadGuard::advance`] will skip
+/// the items' destructors.
 pub unsafe trait BatchReader {
     type Item;
 
     /// Returns a slice of available contiguous items.
+    ///
+    /// Items are returned by shared reference — ownership is **not**
+    /// transferred. See the [trait-level ownership note](BatchReader#ownership).
     fn read_buffer(&mut self) -> &[Self::Item];
 
     /// Advance head by `n` and publish to the producer (atomic store + wake).
+    ///
+    /// Does **not** drop the items being advanced past. The producer may
+    /// immediately overwrite those slots.
     ///
     /// # Safety
     ///
@@ -131,8 +147,45 @@ impl<'a, R: BatchReader> ReadGuard<'a, R> {
     }
 }
 
+/// Yields items by copying them out of the buffer one at a time via
+/// [`ptr::read`](core::ptr::read).
+///
+/// **Not zero-copy** — each [`next`](Iterator::next) performs a bitwise copy
+/// of the item. For bulk operations, prefer [`drain_into`](ReadGuard::drain_into)
+/// or [`copy_into`](ReadGuard::copy_into) which use `memcpy` and are
+/// significantly more efficient. For zero-copy access, use
+/// [`as_slice`](ReadGuard::as_slice).
+impl<R: BatchReader> Iterator for ReadGuard<'_, R> {
+    type Item = R::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let slice = unsafe { self.data.as_ref() };
+        if self.consumed >= slice.len() {
+            return None;
+        }
+        // SAFETY: consumed < slice.len(), pointer is valid and initialized.
+        // The ring buffer does not drop items on advance, so this ptr::read
+        // is the sole owner of the value.
+        let item = unsafe { core::ptr::read(&slice[self.consumed]) };
+        self.consumed += 1;
+        Some(item)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.len();
+        (remaining, Some(remaining))
+    }
+}
+
+impl<R: BatchReader> ExactSizeIterator for ReadGuard<'_, R> {}
+
 impl<R: BatchReader> Drop for ReadGuard<'_, R> {
     fn drop(&mut self) {
+        // If the original buffer was empty, no resources were acquired
+        // (e.g., no shard lock for MPMC). Skip advance and release.
+        if unsafe { self.data.as_ref() }.is_empty() {
+            return;
+        }
         unsafe {
             if self.consumed > 0 {
                 self.receiver.advance(self.consumed);

@@ -143,6 +143,36 @@ impl<T> Receiver<T> {
         ret
     }
 
+    /// Returns a [`ReadGuard`](crate::read_guard::ReadGuard) that provides
+    /// batch read access to available items in the queue.
+    ///
+    /// The guard tracks how many items have been consumed via
+    /// [`ReadGuard::advance`](crate::read_guard::ReadGuard::advance) and
+    /// publishes the new head in a single atomic store when dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::num::NonZeroUsize;
+    /// use gil::spsc::channel;
+    ///
+    /// let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(128).unwrap());
+    ///
+    /// for i in 0..5 {
+    ///     tx.send(i);
+    /// }
+    ///
+    /// let mut guard = rx.read_guard();
+    /// assert_eq!(guard.as_slice(), &[0, 1, 2, 3, 4]);
+    /// guard.advance(guard.len());
+    /// drop(guard);
+    ///
+    /// assert_eq!(rx.try_recv(), None);
+    /// ```
+    pub fn read_guard(&mut self) -> crate::read_guard::ReadGuard<'_, Self> {
+        crate::read_guard::ReadGuard::new(self)
+    }
+
     /// Receives a value from the queue asynchronously.
     ///
     /// This method yields the current task if the queue is empty, and resumes
@@ -242,6 +272,9 @@ unsafe impl<T> BatchReader for Receiver<T> {
     /// The returned slice contains contiguous available items starting from the current head.
     /// It may not represent *all* available items if the buffer wraps around; call
     /// `read_buffer` again after advancing to get the next contiguous chunk.
+    ///
+    /// Items are returned by shared reference — ownership is **not** transferred.
+    /// See [`BatchReader`](crate::read_guard::BatchReader#ownership) for details.
     ///
     /// # Examples
     ///

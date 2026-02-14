@@ -319,7 +319,7 @@ fn benchmark(c: &mut Criterion) {
                             handles.push(spawn(move || {
                                 let mut received = 0;
                                 while received < messages_per_receiver {
-                                    let mut guard = rx_clone.read_buffer();
+                                    let mut guard = rx_clone.read_guard();
                                     let len = guard.len();
                                     if len == 0 {
                                         spin_loop();
@@ -327,7 +327,7 @@ fn benchmark(c: &mut Criterion) {
                                     }
 
                                     let to_process = len.min(messages_per_receiver - received);
-                                    black_box(guard[0]);
+                                    black_box(guard.as_slice()[0]);
                                     guard.advance(to_process);
                                     received += to_process;
                                 }
@@ -337,7 +337,7 @@ fn benchmark(c: &mut Criterion) {
                         handles.push(spawn(move || {
                             let mut received = 0;
                             while received < messages_per_receiver {
-                                let mut guard = rx.read_buffer();
+                                let mut guard = rx.read_guard();
                                 let len = guard.len();
                                 if len == 0 {
                                     spin_loop();
@@ -345,7 +345,7 @@ fn benchmark(c: &mut Criterion) {
                                 }
 
                                 let to_process = len.min(messages_per_receiver - received);
-                                black_box(guard[0]);
+                                black_box(guard.as_slice()[0]);
                                 guard.advance(to_process);
                                 received += to_process;
                             }
@@ -474,7 +474,7 @@ fn benchmark(c: &mut Criterion) {
                             handles.push(spawn(move || {
                                 let mut received = 0;
                                 while received < messages_per_receiver {
-                                    let mut guard = rx_clone.read_buffer();
+                                    let mut guard = rx_clone.read_guard();
                                     let len = guard.len();
                                     if len == 0 {
                                         spin_loop();
@@ -482,7 +482,7 @@ fn benchmark(c: &mut Criterion) {
                                     }
 
                                     let to_process = len.min(messages_per_receiver - received);
-                                    black_box(guard[0]);
+                                    black_box(guard.as_slice()[0]);
                                     guard.advance(to_process);
                                     received += to_process;
                                 }
@@ -492,7 +492,7 @@ fn benchmark(c: &mut Criterion) {
                         handles.push(spawn(move || {
                             let mut received = 0;
                             while received < messages_per_receiver {
-                                let mut guard = rx.read_buffer();
+                                let mut guard = rx.read_guard();
                                 let len = guard.len();
                                 if len == 0 {
                                     spin_loop();
@@ -500,7 +500,7 @@ fn benchmark(c: &mut Criterion) {
                                 }
 
                                 let to_process = len.min(messages_per_receiver - received);
-                                black_box(guard[0]);
+                                black_box(guard.as_slice()[0]);
                                 guard.advance(to_process);
                                 received += to_process;
                             }

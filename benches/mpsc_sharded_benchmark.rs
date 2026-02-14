@@ -302,16 +302,16 @@ fn benchmark(c: &mut Criterion) {
                         let mut received = 0;
                         let total_to_receive = messages_per_sender * sender_count;
                         while received < total_to_receive {
-                            let buf = rx.read_buffer();
-                            let len = buf.len();
+                            let mut guard = rx.read_guard();
+                            let len = guard.len();
                             if len == 0 {
                                 spin_loop();
                                 continue;
                             }
 
-                            black_box(buf[0]);
+                            black_box(guard.as_slice()[0]);
 
-                            unsafe { rx.advance(len) };
+                            guard.advance(len);
                             received += len;
                         }
 
@@ -421,16 +421,16 @@ fn benchmark(c: &mut Criterion) {
                         let mut received = 0;
                         let total_to_receive = messages_per_sender * sender_count;
                         while received < total_to_receive {
-                            let buf = rx.read_buffer();
-                            let len = buf.len();
+                            let mut guard = rx.read_guard();
+                            let len = guard.len();
                             if len == 0 {
                                 spin_loop();
                                 continue;
                             }
 
-                            black_box(buf[0]);
+                            black_box(guard.as_slice()[0]);
 
-                            unsafe { rx.advance(len) };
+                            guard.advance(len);
                             received += len;
                         }
 

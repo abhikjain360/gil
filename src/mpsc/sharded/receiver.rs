@@ -140,10 +140,8 @@ impl<T> Receiver<T> {
         }
     }
 
-    /// Returns a slice of the internal read buffer from one of the shards.
-    ///
-    /// If no elements are available in any shard, an empty slice is returned. After
-    /// reading, call [`advance`](Receiver::advance) to mark items as consumed.
+    /// Returns a [`ReadGuard`](crate::read_guard::ReadGuard) that provides
+    /// batch read access to available items across shards.
     ///
     /// # Examples
     ///
@@ -159,12 +157,55 @@ impl<T> Receiver<T> {
     /// tx.send(10);
     /// tx.send(20);
     ///
+    /// let mut guard = rx.read_guard();
+    /// assert_eq!(guard.as_slice(), &[10, 20]);
+    /// guard.advance(guard.len());
+    /// drop(guard);
+    ///
+    /// assert_eq!(rx.try_recv(), None);
+    /// ```
+    pub fn read_guard(&mut self) -> crate::read_guard::ReadGuard<'_, Self> {
+        crate::read_guard::ReadGuard::new(self)
+    }
+}
+
+/// # Safety
+///
+/// The implementation delegates to the per-shard SPSC receivers.
+/// `read_buffer` polls shards round-robin and returns the first non-empty
+/// contiguous slice. `advance` publishes the new head on the active shard.
+///
+/// Items are returned by shared reference — ownership is **not** transferred.
+/// See [`BatchReader`](crate::read_guard::BatchReader#ownership) for details.
+unsafe impl<T> BatchReader for Receiver<T> {
+    type Item = T;
+
+    /// Returns a slice of available items from one of the shards.
+    ///
+    /// Items are returned by shared reference — ownership is **not**
+    /// transferred. See [`BatchReader`](crate::read_guard::BatchReader#ownership).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core::num::NonZeroUsize;
+    /// use gil::mpsc::sharded::channel;
+    /// use gil::read_guard::BatchReader;
+    ///
+    /// let (mut tx, mut rx) = channel::<usize>(
+    ///     NonZeroUsize::new(1).unwrap(),
+    ///     NonZeroUsize::new(128).unwrap(),
+    /// );
+    ///
+    /// tx.send(10);
+    /// tx.send(20);
+    ///
     /// let buf = rx.read_buffer();
     /// assert_eq!(buf.len(), 2);
     /// let count = buf.len();
     /// unsafe { rx.advance(count) };
     /// ```
-    pub fn read_buffer(&mut self) -> &[T] {
+    fn read_buffer(&mut self) -> &[T] {
         let start = self.next_shard;
         loop {
             let ret = self.receivers[self.next_shard].read_buffer();
@@ -184,18 +225,20 @@ impl<T> Receiver<T> {
         }
     }
 
-    /// Advances the read pointer of the last shard accessed by [`read_buffer`](Receiver::read_buffer).
+    /// Advances the read pointer of the last shard accessed by
+    /// [`read_buffer`](BatchReader::read_buffer).
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `len` is less than or equal to the length of the slice
-    /// returned by the last call to [`read_buffer`](Receiver::read_buffer).
+    /// `len` must not exceed the length of the slice returned by the last
+    /// call to [`read_buffer`](BatchReader::read_buffer).
     ///
     /// # Examples
     ///
     /// ```
     /// use core::num::NonZeroUsize;
     /// use gil::mpsc::sharded::channel;
+    /// use gil::read_guard::BatchReader;
     ///
     /// let (mut tx, mut rx) = channel::<usize>(
     ///     NonZeroUsize::new(1).unwrap(),
@@ -209,7 +252,7 @@ impl<T> Receiver<T> {
     ///
     /// assert_eq!(rx.try_recv(), None);
     /// ```
-    pub unsafe fn advance(&mut self, len: usize) {
+    unsafe fn advance(&mut self, len: usize) {
         unsafe { self.receivers[self.next_shard].advance(len) };
     }
 }
