@@ -50,6 +50,7 @@ pub use self::{receiver::Receiver, sender::Sender};
 mod queue;
 mod receiver;
 mod sender;
+pub mod sharded;
 
 /// Creates a new single-producer multi-consumer (SPMC) queue.
 ///
