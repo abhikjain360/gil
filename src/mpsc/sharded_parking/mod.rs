@@ -238,10 +238,8 @@ mod test {
 
     #[test]
     fn test_sender_parks_and_wakes() {
-        let (mut tx, mut rx) = channel::<usize>(
-            NonZeroUsize::new(1).unwrap(),
-            NonZeroUsize::new(2).unwrap(),
-        );
+        let (mut tx, mut rx) =
+            channel::<usize>(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(2).unwrap());
 
         // Fill the queue
         tx.send(1);

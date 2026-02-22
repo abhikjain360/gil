@@ -23,11 +23,9 @@ impl<T> ParkingShards<T> {
 
         unsafe {
             // Initialize rc to 1
-            _field!(ParkingShards<T>, ptr, rc.value, AtomicUsize)
-                .write(AtomicUsize::new(1));
+            _field!(ParkingShards<T>, ptr, rc.value, AtomicUsize).write(AtomicUsize::new(1));
             // Initialize futex to 0
-            _field!(ParkingShards<T>, ptr, futex.value, AtomicU32)
-                .write(AtomicU32::new(0));
+            _field!(ParkingShards<T>, ptr, futex.value, AtomicU32).write(AtomicU32::new(0));
         }
 
         ptr.cast()
@@ -87,9 +85,7 @@ impl<T> ParkingShardsPtr<T> {
     }
 
     pub(crate) fn futex(&self) -> &AtomicU32 {
-        unsafe {
-            _field!(ParkingShards<T>, self.ptr, futex.value, AtomicU32).as_ref()
-        }
+        unsafe { _field!(ParkingShards<T>, self.ptr, futex.value, AtomicU32).as_ref() }
     }
 
     fn rc(&self) -> &AtomicUsize {
