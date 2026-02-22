@@ -75,6 +75,7 @@
 use core::num::NonZeroUsize;
 
 pub(crate) use self::queue::QueuePtr;
+pub(crate) mod parking_shards;
 pub(crate) mod shards;
 pub use self::{receiver::Receiver, sender::Sender};
 
