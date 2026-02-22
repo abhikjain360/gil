@@ -67,6 +67,30 @@ harness = false
 name = "mpmc_sharded_benchmark"
 harness = false
 
+[[bench]]
+name = "spmc_sharded_benchmark"
+harness = false
+
+[[bench]]
+name = "mpsc_sharded_parking_benchmark"
+harness = false
+
+[[bench]]
+name = "mpsc_sharded_parking_efficiency"
+harness = false
+
+[[bench]]
+name = "mpsc_efficiency"
+harness = false
+
+[[bench]]
+name = "spmc_sharded_parking_benchmark"
+harness = false
+
+[[bench]]
+name = "spmc_sharded_parking_efficiency"
+harness = false
+
 [dev-dependencies]
 criterion = { version = "0.8.2", features = [
     "async",
