@@ -51,6 +51,7 @@ mod queue;
 mod receiver;
 mod sender;
 pub mod sharded;
+pub mod sharded_parking;
 
 /// Creates a new single-producer multi-consumer (SPMC) queue.
 ///
