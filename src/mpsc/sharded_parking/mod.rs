@@ -184,8 +184,8 @@ mod test {
                     while sent < TOTAL_ITEMS_PER_THREAD {
                         let buffer = tx.write_buffer();
                         let batch_size = buffer.len().min(TOTAL_ITEMS_PER_THREAD - sent);
-                        for i in 0..batch_size {
-                            buffer[i].write(thread_id * 10000 + sent + i);
+                        for (i, slot) in buffer.iter_mut().enumerate().take(batch_size) {
+                            slot.write(thread_id * 10000 + sent + i);
                         }
                         unsafe { tx.commit(batch_size) };
                         sent += batch_size;
@@ -199,8 +199,8 @@ mod test {
                 while sent < TOTAL_ITEMS_PER_THREAD {
                     let buffer = tx.write_buffer();
                     let batch_size = buffer.len().min(TOTAL_ITEMS_PER_THREAD - sent);
-                    for i in 0..batch_size {
-                        buffer[i].write(thread_id * 10000 + sent + i);
+                    for (i, slot) in buffer.iter_mut().enumerate().take(batch_size) {
+                        slot.write(thread_id * 10000 + sent + i);
                     }
                     unsafe { tx.commit(batch_size) };
                     sent += batch_size;

@@ -1,6 +1,6 @@
 [package]
 name = "gil"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["Abhik Jain <abhik@abhikjain.xyz>"]
 description = "A collection of high-performance, lock-free concurrent queues (SPSC, MPSC, MPMC, SPMC) with sync and async support"
@@ -14,13 +14,13 @@ readme = "README.md"
 exclude = [".lazy.lua", "Cargo.lock", "AGENTS.md", "CLAUDE.md"]
 
 [dependencies]
-atomic-wait = "1.1.0"
+atomic-wait = { version = "1.1.0", optional = true }
 futures = { version = "0.3.31", optional = true, default-features = false }
 loom = { version = "0.7.2", optional = true }
 
 [features]
 default = ["std"]
-std = []
+std = ["dep:atomic-wait"]
 async = ["dep:futures"]
 async-std = ["async", "std", "futures/std"]
 

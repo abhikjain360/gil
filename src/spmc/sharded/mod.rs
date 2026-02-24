@@ -132,8 +132,8 @@ mod test {
                 while sent < TOTAL {
                     let buf = tx.write_buffer();
                     let batch = buf.len().min(TOTAL - sent);
-                    for i in 0..batch {
-                        buf[i].write(sent + i);
+                    for (i, slot) in buf.iter_mut().enumerate().take(batch) {
+                        slot.write(sent + i);
                     }
                     unsafe { tx.commit(batch) };
                     sent += batch;

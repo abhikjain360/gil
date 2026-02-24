@@ -58,6 +58,7 @@ mod queue;
 mod receiver;
 mod sender;
 pub mod sharded;
+#[cfg(feature = "std")]
 pub mod sharded_parking;
 
 /// Creates a new multi-producer single-consumer (MPSC) queue.

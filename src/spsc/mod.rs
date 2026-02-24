@@ -75,10 +75,12 @@
 use core::num::NonZeroUsize;
 
 pub(crate) use self::queue::QueuePtr;
+#[cfg(feature = "std")]
 pub(crate) mod parking_shards;
 pub(crate) mod shards;
 pub use self::{receiver::Receiver, sender::Sender};
 
+#[cfg(feature = "std")]
 pub mod parking;
 mod queue;
 mod receiver;
@@ -123,13 +125,13 @@ mod test {
 
         thread::spawn(move || {
             for i in 0..COUNTS.get() << 3 {
-                tx.send(i as usize);
+                tx.send(i);
             }
         });
 
         for i in 0..COUNTS.get() << 3 {
             let r = rx.recv();
-            assert_eq!(r, i as usize);
+            assert_eq!(r, i);
         }
     }
 
@@ -184,8 +186,8 @@ mod test {
             while sent < TOTAL_ITEMS {
                 let buffer = tx.write_buffer();
                 let batch_size = buffer.len().min(TOTAL_ITEMS - sent);
-                for i in 0..batch_size {
-                    buffer[i].write(sent + i);
+                for (i, slot) in buffer.iter_mut().enumerate().take(batch_size) {
+                    slot.write(sent + i);
                 }
                 unsafe { tx.commit(batch_size) };
                 sent += batch_size;
