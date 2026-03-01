@@ -126,6 +126,31 @@ impl<'a, R: BatchReader> ReadGuard<'a, R> {
         len
     }
 
+    /// Move remaining items into the user's raw pointer. This allows writing
+    /// to any container not limited to Vec.
+    ///
+    /// Copies items in bulk via `memcpy`. After this call the guard's view
+    /// is empty.
+    ///
+    /// # Safety
+    ///
+    /// Offsets should be pre-calculated prior to calling this method.
+    ///
+    /// User is responsible for any post-processing required on their container,
+    /// e.g calling `set_len` or similar.
+    pub unsafe fn drain_into_ptr(&mut self, dst: *mut R::Item) -> usize {
+        let slice = self.as_slice();
+        let len = slice.len();
+        if len == 0 {
+            return 0;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(slice.as_ptr(), dst, len);
+        }
+        self.consumed += len;
+        len
+    }
+
     /// Copy remaining items into the user's slice.
     ///
     /// Returns how many items were copied (min of available and `dst.len()`).
