@@ -155,8 +155,10 @@ fn benchmark(c: &mut Criterion) {
                 |b| {
                     b.iter_custom(|iter| {
                         let iter = iter as usize;
-                        let (mut tx, rx) =
-                            channel::<Payload1024>(NonZeroUsize::new(receiver_count).unwrap(), size);
+                        let (mut tx, rx) = channel::<Payload1024>(
+                            NonZeroUsize::new(receiver_count).unwrap(),
+                            size,
+                        );
 
                         let barrier = Arc::new(Barrier::new(receiver_count + 1));
                         let messages_per_receiver = iter / receiver_count;
@@ -220,10 +222,8 @@ fn benchmark(c: &mut Criterion) {
                     format!("size_{size}/receivers_{receiver_count}/direct"),
                     |b| {
                         b.iter(|| {
-                            let (mut tx, rx) = channel::<usize>(
-                                NonZeroUsize::new(receiver_count).unwrap(),
-                                size,
-                            );
+                            let (mut tx, rx) =
+                                channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
                             let messages_per_receiver = ELEMENTS / receiver_count;
 
                             let mut handles = Vec::with_capacity(receiver_count);
@@ -258,10 +258,8 @@ fn benchmark(c: &mut Criterion) {
                     format!("size_{size}/receivers_{receiver_count}/batched"),
                     |b| {
                         b.iter(|| {
-                            let (mut tx, rx) = channel::<usize>(
-                                NonZeroUsize::new(receiver_count).unwrap(),
-                                size,
-                            );
+                            let (mut tx, rx) =
+                                channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
                             let messages_per_receiver = ELEMENTS / receiver_count;
 
                             let mut handles = Vec::with_capacity(receiver_count);

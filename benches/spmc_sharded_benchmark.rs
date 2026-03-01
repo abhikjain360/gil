@@ -155,8 +155,10 @@ fn benchmark(c: &mut Criterion) {
                 |b| {
                     b.iter_custom(|iter| {
                         let iter = iter as usize;
-                        let (mut tx, rx) =
-                            channel::<Payload1024>(NonZeroUsize::new(receiver_count).unwrap(), size);
+                        let (mut tx, rx) = channel::<Payload1024>(
+                            NonZeroUsize::new(receiver_count).unwrap(),
+                            size,
+                        );
 
                         let barrier = Arc::new(Barrier::new(receiver_count + 1));
                         let messages_per_receiver = iter / receiver_count;
@@ -216,53 +218,77 @@ fn benchmark(c: &mut Criterion) {
 
         for size in SIZES {
             for &receiver_count in &RECEIVER_COUNTS {
-                group.bench_function(format!("size_{size}/receivers_{receiver_count}/direct"), |b| {
-                    b.iter(|| {
-                        let (mut tx, rx) =
-                            channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
-                        let messages_per_receiver = ELEMENTS / receiver_count;
+                group.bench_function(
+                    format!("size_{size}/receivers_{receiver_count}/direct"),
+                    |b| {
+                        b.iter(|| {
+                            let (mut tx, rx) =
+                                channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
+                            let messages_per_receiver = ELEMENTS / receiver_count;
 
-                        let mut handles = Vec::with_capacity(receiver_count);
-                        for _ in 0..receiver_count - 1 {
-                            let mut rx_clone = rx.clone().unwrap();
+                            let mut handles = Vec::with_capacity(receiver_count);
+                            for _ in 0..receiver_count - 1 {
+                                let mut rx_clone = rx.clone().unwrap();
+                                handles.push(spawn(move || {
+                                    for _ in 0..messages_per_receiver {
+                                        black_box(rx_clone.recv());
+                                    }
+                                }));
+                            }
+
+                            let mut rx = rx;
                             handles.push(spawn(move || {
                                 for _ in 0..messages_per_receiver {
-                                    black_box(rx_clone.recv());
+                                    black_box(rx.recv());
                                 }
                             }));
-                        }
 
-                        let mut rx = rx;
-                        handles.push(spawn(move || {
-                            for _ in 0..messages_per_receiver {
-                                black_box(rx.recv());
+                            for i in 0..(messages_per_receiver * receiver_count) {
+                                tx.send(black_box(i));
                             }
-                        }));
 
-                        for i in 0..(messages_per_receiver * receiver_count) {
-                            tx.send(black_box(i));
-                        }
+                            for handle in handles {
+                                handle.join().unwrap();
+                            }
+                        });
+                    },
+                );
 
-                        for handle in handles {
-                            handle.join().unwrap();
-                        }
-                    });
-                });
+                group.bench_function(
+                    format!("size_{size}/receivers_{receiver_count}/batched"),
+                    |b| {
+                        b.iter(|| {
+                            let (mut tx, rx) =
+                                channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
+                            let messages_per_receiver = ELEMENTS / receiver_count;
+                            let total = messages_per_receiver * receiver_count;
 
-                group.bench_function(format!("size_{size}/receivers_{receiver_count}/batched"), |b| {
-                    b.iter(|| {
-                        let (mut tx, rx) =
-                            channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
-                        let messages_per_receiver = ELEMENTS / receiver_count;
-                        let total = messages_per_receiver * receiver_count;
+                            let mut handles = Vec::with_capacity(receiver_count);
+                            for _ in 0..receiver_count - 1 {
+                                let mut rx_clone = rx.clone().unwrap();
+                                handles.push(spawn(move || {
+                                    let mut received = 0;
+                                    while received < messages_per_receiver {
+                                        let mut guard = rx_clone.read_guard();
+                                        let len = guard.len();
+                                        if len == 0 {
+                                            spin_loop();
+                                            continue;
+                                        }
 
-                        let mut handles = Vec::with_capacity(receiver_count);
-                        for _ in 0..receiver_count - 1 {
-                            let mut rx_clone = rx.clone().unwrap();
+                                        black_box(guard.as_slice()[0]);
+
+                                        guard.advance(len);
+                                        received += len;
+                                    }
+                                }));
+                            }
+
+                            let mut rx = rx;
                             handles.push(spawn(move || {
                                 let mut received = 0;
                                 while received < messages_per_receiver {
-                                    let mut guard = rx_clone.read_guard();
+                                    let mut guard = rx.read_guard();
                                     let len = guard.len();
                                     if len == 0 {
                                         spin_loop();
@@ -275,48 +301,30 @@ fn benchmark(c: &mut Criterion) {
                                     received += len;
                                 }
                             }));
-                        }
 
-                        let mut rx = rx;
-                        handles.push(spawn(move || {
-                            let mut received = 0;
-                            while received < messages_per_receiver {
-                                let mut guard = rx.read_guard();
-                                let len = guard.len();
+                            let mut sent = 0;
+                            while sent < total {
+                                let buf = tx.write_buffer();
+                                let len = buf.len().min(total - sent);
                                 if len == 0 {
                                     spin_loop();
                                     continue;
                                 }
 
-                                black_box(guard.as_slice()[0]);
+                                for (i, item) in buf.iter_mut().enumerate().take(len) {
+                                    item.write(black_box(sent + i));
+                                }
 
-                                guard.advance(len);
-                                received += len;
-                            }
-                        }));
-
-                        let mut sent = 0;
-                        while sent < total {
-                            let buf = tx.write_buffer();
-                            let len = buf.len().min(total - sent);
-                            if len == 0 {
-                                spin_loop();
-                                continue;
+                                unsafe { tx.commit(len) };
+                                sent += len;
                             }
 
-                            for (i, item) in buf.iter_mut().enumerate().take(len) {
-                                item.write(black_box(sent + i));
+                            for handle in handles {
+                                handle.join().unwrap();
                             }
-
-                            unsafe { tx.commit(len) };
-                            sent += len;
-                        }
-
-                        for handle in handles {
-                            handle.join().unwrap();
-                        }
-                    });
-                });
+                        });
+                    },
+                );
             }
         }
     }
@@ -332,53 +340,81 @@ fn benchmark(c: &mut Criterion) {
 
         for size in SIZES {
             for &receiver_count in &RECEIVER_COUNTS {
-                group.bench_function(format!("size_{size}/receivers_{receiver_count}/direct"), |b| {
-                    b.iter(|| {
-                        let (mut tx, rx) =
-                            channel::<Payload1024>(NonZeroUsize::new(receiver_count).unwrap(), size);
-                        let messages_per_receiver = LARGE_ELEMENTS / receiver_count;
+                group.bench_function(
+                    format!("size_{size}/receivers_{receiver_count}/direct"),
+                    |b| {
+                        b.iter(|| {
+                            let (mut tx, rx) = channel::<Payload1024>(
+                                NonZeroUsize::new(receiver_count).unwrap(),
+                                size,
+                            );
+                            let messages_per_receiver = LARGE_ELEMENTS / receiver_count;
 
-                        let mut handles = Vec::with_capacity(receiver_count);
-                        for _ in 0..receiver_count - 1 {
-                            let mut rx_clone = rx.clone().unwrap();
+                            let mut handles = Vec::with_capacity(receiver_count);
+                            for _ in 0..receiver_count - 1 {
+                                let mut rx_clone = rx.clone().unwrap();
+                                handles.push(spawn(move || {
+                                    for _ in 0..messages_per_receiver {
+                                        black_box(rx_clone.recv());
+                                    }
+                                }));
+                            }
+
+                            let mut rx = rx;
                             handles.push(spawn(move || {
                                 for _ in 0..messages_per_receiver {
-                                    black_box(rx_clone.recv());
+                                    black_box(rx.recv());
                                 }
                             }));
-                        }
 
-                        let mut rx = rx;
-                        handles.push(spawn(move || {
-                            for _ in 0..messages_per_receiver {
-                                black_box(rx.recv());
+                            for i in 0..(messages_per_receiver * receiver_count) {
+                                tx.send(black_box(Payload1024::new(i as u8)));
                             }
-                        }));
 
-                        for i in 0..(messages_per_receiver * receiver_count) {
-                            tx.send(black_box(Payload1024::new(i as u8)));
-                        }
+                            for handle in handles {
+                                handle.join().unwrap();
+                            }
+                        });
+                    },
+                );
 
-                        for handle in handles {
-                            handle.join().unwrap();
-                        }
-                    });
-                });
+                group.bench_function(
+                    format!("size_{size}/receivers_{receiver_count}/batched"),
+                    |b| {
+                        b.iter(|| {
+                            let (mut tx, rx) = channel::<Payload1024>(
+                                NonZeroUsize::new(receiver_count).unwrap(),
+                                size,
+                            );
+                            let messages_per_receiver = LARGE_ELEMENTS / receiver_count;
+                            let total = messages_per_receiver * receiver_count;
 
-                group.bench_function(format!("size_{size}/receivers_{receiver_count}/batched"), |b| {
-                    b.iter(|| {
-                        let (mut tx, rx) =
-                            channel::<Payload1024>(NonZeroUsize::new(receiver_count).unwrap(), size);
-                        let messages_per_receiver = LARGE_ELEMENTS / receiver_count;
-                        let total = messages_per_receiver * receiver_count;
+                            let mut handles = Vec::with_capacity(receiver_count);
+                            for _ in 0..receiver_count - 1 {
+                                let mut rx_clone = rx.clone().unwrap();
+                                handles.push(spawn(move || {
+                                    let mut received = 0;
+                                    while received < messages_per_receiver {
+                                        let mut guard = rx_clone.read_guard();
+                                        let len = guard.len();
+                                        if len == 0 {
+                                            spin_loop();
+                                            continue;
+                                        }
 
-                        let mut handles = Vec::with_capacity(receiver_count);
-                        for _ in 0..receiver_count - 1 {
-                            let mut rx_clone = rx.clone().unwrap();
+                                        black_box(guard.as_slice()[0]);
+
+                                        guard.advance(len);
+                                        received += len;
+                                    }
+                                }));
+                            }
+
+                            let mut rx = rx;
                             handles.push(spawn(move || {
                                 let mut received = 0;
                                 while received < messages_per_receiver {
-                                    let mut guard = rx_clone.read_guard();
+                                    let mut guard = rx.read_guard();
                                     let len = guard.len();
                                     if len == 0 {
                                         spin_loop();
@@ -391,48 +427,30 @@ fn benchmark(c: &mut Criterion) {
                                     received += len;
                                 }
                             }));
-                        }
 
-                        let mut rx = rx;
-                        handles.push(spawn(move || {
-                            let mut received = 0;
-                            while received < messages_per_receiver {
-                                let mut guard = rx.read_guard();
-                                let len = guard.len();
+                            let mut sent = 0;
+                            while sent < total {
+                                let buf = tx.write_buffer();
+                                let len = buf.len().min(total - sent);
                                 if len == 0 {
                                     spin_loop();
                                     continue;
                                 }
 
-                                black_box(guard.as_slice()[0]);
+                                for item in buf.iter_mut().take(len) {
+                                    item.write(black_box(Payload1024::new(0)));
+                                }
 
-                                guard.advance(len);
-                                received += len;
-                            }
-                        }));
-
-                        let mut sent = 0;
-                        while sent < total {
-                            let buf = tx.write_buffer();
-                            let len = buf.len().min(total - sent);
-                            if len == 0 {
-                                spin_loop();
-                                continue;
+                                unsafe { tx.commit(len) };
+                                sent += len;
                             }
 
-                            for item in buf.iter_mut().take(len) {
-                                item.write(black_box(Payload1024::new(0)));
+                            for handle in handles {
+                                handle.join().unwrap();
                             }
-
-                            unsafe { tx.commit(len) };
-                            sent += len;
-                        }
-
-                        for handle in handles {
-                            handle.join().unwrap();
-                        }
-                    });
-                });
+                        });
+                    },
+                );
             }
         }
     }

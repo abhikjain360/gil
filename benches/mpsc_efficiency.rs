@@ -151,12 +151,7 @@ fn main() {
 
     println!("Sustained throughput (1M items):");
     for &senders in &[1, 2, 4] {
-        run_sustained(
-            &format!("size_4096/{senders}tx"),
-            size,
-            1_000_000,
-            senders,
-        );
+        run_sustained(&format!("size_4096/{senders}tx"), size, 1_000_000, senders);
     }
 
     println!("\nBursty (100 bursts x 1000 items, 1ms gaps):");

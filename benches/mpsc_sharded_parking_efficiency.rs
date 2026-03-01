@@ -15,8 +15,7 @@ fn cpu_time_us() -> u64 {
 }
 
 fn run_sustained(label: &str, size: NonZeroUsize, count: usize, sender_count: usize) {
-    let (tx, mut rx) =
-        channel::<usize>(NonZeroUsize::new(sender_count).unwrap(), size);
+    let (tx, mut rx) = channel::<usize>(NonZeroUsize::new(sender_count).unwrap(), size);
 
     let cpu_start = cpu_time_us();
     let wall_start = Instant::now();
@@ -68,8 +67,7 @@ fn run_bursty(
     gap_ms: u64,
     sender_count: usize,
 ) {
-    let (tx, mut rx) =
-        channel::<usize>(NonZeroUsize::new(sender_count).unwrap(), size);
+    let (tx, mut rx) = channel::<usize>(NonZeroUsize::new(sender_count).unwrap(), size);
 
     let total = bursts * burst_size;
     let per_sender = burst_size / sender_count;
@@ -125,8 +123,7 @@ fn run_bursty(
 }
 
 fn run_idle_wait(label: &str, size: NonZeroUsize, wait_ms: u64) {
-    let (mut tx, mut rx) =
-        channel::<usize>(NonZeroUsize::new(1).unwrap(), size);
+    let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(1).unwrap(), size);
 
     let cpu_start = cpu_time_us();
     let wall_start = Instant::now();
@@ -162,17 +159,38 @@ fn main() {
 
     println!("\nBursty (100 bursts x 1000 items, 1ms gaps):");
     for &sc in &sender_counts {
-        run_bursty(&format!("size_4096/1ms_gap/{sc}_senders"), size, 100, 1000, 1, sc);
+        run_bursty(
+            &format!("size_4096/1ms_gap/{sc}_senders"),
+            size,
+            100,
+            1000,
+            1,
+            sc,
+        );
     }
 
     println!("\nBursty (100 bursts x 1000 items, 5ms gaps):");
     for &sc in &sender_counts {
-        run_bursty(&format!("size_4096/5ms_gap/{sc}_senders"), size, 100, 1000, 5, sc);
+        run_bursty(
+            &format!("size_4096/5ms_gap/{sc}_senders"),
+            size,
+            100,
+            1000,
+            5,
+            sc,
+        );
     }
 
     println!("\nBursty (50 bursts x 1000 items, 10ms gaps):");
     for &sc in &sender_counts {
-        run_bursty(&format!("size_4096/10ms_gap/{sc}_senders"), size, 50, 1000, 10, sc);
+        run_bursty(
+            &format!("size_4096/10ms_gap/{sc}_senders"),
+            size,
+            50,
+            1000,
+            10,
+            sc,
+        );
     }
 
     println!("\nIdle wait (consumer waits for delayed producer):");

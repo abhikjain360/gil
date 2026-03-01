@@ -123,8 +123,10 @@ mod test {
         const CAPACITY: usize = 256;
         const TOTAL: usize = 1024;
 
-        let (mut tx, mut rx) =
-            channel::<usize>(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(CAPACITY).unwrap());
+        let (mut tx, mut rx) = channel::<usize>(
+            NonZeroUsize::new(1).unwrap(),
+            NonZeroUsize::new(CAPACITY).unwrap(),
+        );
 
         thread::scope(|scope| {
             scope.spawn(move || {

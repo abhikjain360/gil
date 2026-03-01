@@ -15,8 +15,7 @@ fn cpu_time_us() -> u64 {
 }
 
 fn run_sustained(label: &str, size: NonZeroUsize, count: usize, receiver_count: usize) {
-    let (mut tx, rx) =
-        channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
+    let (mut tx, rx) = channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
 
     let cpu_start = cpu_time_us();
     let wall_start = Instant::now();
@@ -65,8 +64,7 @@ fn run_bursty(
     gap_ms: u64,
     receiver_count: usize,
 ) {
-    let (mut tx, rx) =
-        channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
+    let (mut tx, rx) = channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
 
     let cpu_start = cpu_time_us();
     let wall_start = Instant::now();
@@ -114,8 +112,7 @@ fn run_bursty(
 }
 
 fn run_idle_wait(label: &str, size: NonZeroUsize, wait_ms: u64) {
-    let (mut tx, mut rx) =
-        channel::<usize>(NonZeroUsize::new(1).unwrap(), size);
+    let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(1).unwrap(), size);
 
     let cpu_start = cpu_time_us();
     let wall_start = Instant::now();
@@ -150,17 +147,38 @@ fn main() {
 
     println!("\nBursty (100 bursts x 1000 items, 1ms gaps):");
     for &rc in &[1, 2, 4] {
-        run_bursty(&format!("size_4096/1ms_gap/rx_{rc}"), size, 100, 1000, 1, rc);
+        run_bursty(
+            &format!("size_4096/1ms_gap/rx_{rc}"),
+            size,
+            100,
+            1000,
+            1,
+            rc,
+        );
     }
 
     println!("\nBursty (100 bursts x 1000 items, 5ms gaps):");
     for &rc in &[1, 2, 4] {
-        run_bursty(&format!("size_4096/5ms_gap/rx_{rc}"), size, 100, 1000, 5, rc);
+        run_bursty(
+            &format!("size_4096/5ms_gap/rx_{rc}"),
+            size,
+            100,
+            1000,
+            5,
+            rc,
+        );
     }
 
     println!("\nBursty (50 bursts x 1000 items, 10ms gaps):");
     for &rc in &[1, 2, 4] {
-        run_bursty(&format!("size_4096/10ms_gap/rx_{rc}"), size, 50, 1000, 10, rc);
+        run_bursty(
+            &format!("size_4096/10ms_gap/rx_{rc}"),
+            size,
+            50,
+            1000,
+            10,
+            rc,
+        );
     }
 
     println!("\nIdle wait (consumer waits for delayed producer):");
