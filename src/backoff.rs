@@ -208,4 +208,14 @@ impl ParkingBackoff {
 
         false
     }
+
+    /// Resets the spin counter to zero.
+    ///
+    /// The next call to [`backoff`](ParkingBackoff::backoff) will start spinning from
+    /// the beginning.
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.spin_count = 0;
+        self.yield_count = 0;
+    }
 }
