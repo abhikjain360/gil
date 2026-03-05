@@ -1,5 +1,11 @@
 use crate::{atomic::Ordering, read_guard::BatchReader, spsc::queue::QueuePtr};
 
+#[cfg(feature = "async")]
+use core::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+
 /// The consumer end of the SPSC queue.
 ///
 /// This struct is `Send` but not `Sync` or `Clone`. It can be moved to another thread, but cannot be shared
@@ -18,9 +24,9 @@ use crate::{atomic::Ordering, read_guard::BatchReader, spsc::queue::QueuePtr};
 /// assert_eq!(rx.recv(), 2);
 /// ```
 pub struct Receiver<T> {
-    ptr: QueuePtr<T>,
-    local_tail: usize,
-    local_head: usize,
+    pub ptr: QueuePtr<T>,
+    pub local_tail: usize,
+    pub local_head: usize,
 }
 
 impl<T> Receiver<T> {
@@ -254,6 +260,25 @@ impl<T> Receiver<T> {
 }
 
 unsafe impl<T: Send> Send for Receiver<T> {}
+
+#[cfg(feature = "async")]
+impl<T> futures::Stream for Receiver<T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(v) = self.try_recv() {
+            return Poll::Ready(Some(v));
+        }
+
+        self.ptr.register_receiver_waker(cx.waker());
+        self.local_tail = self.ptr.tail().load(Ordering::SeqCst);
+        if let Some(v) = self.try_recv() {
+            return Poll::Ready(Some(v));
+        }
+
+        Poll::Pending
+    }
+}
 
 /// # Safety
 ///

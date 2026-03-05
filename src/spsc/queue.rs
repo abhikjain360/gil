@@ -12,7 +12,7 @@ use crate::{
 
 #[derive(Default)]
 #[repr(C)]
-pub(crate) struct Head {
+pub struct Head {
     head: Padded<AtomicUsize>,
     #[cfg(feature = "async")]
     receiver_waker: Padded<AtomicWaker>,
@@ -20,13 +20,13 @@ pub(crate) struct Head {
 
 #[derive(Default)]
 #[repr(C)]
-pub(crate) struct Tail {
+pub struct Tail {
     tail: Padded<AtomicUsize>,
     #[cfg(feature = "async")]
     sender_waker: Padded<AtomicWaker>,
 }
 
-pub(crate) struct GetInit;
+pub struct GetInit;
 
 impl<T> crate::DropInitItems<Head, Tail, T> for GetInit {
     unsafe fn drop_init_items(
@@ -62,12 +62,12 @@ type Queue = crate::Queue<Head, Tail>;
 
 impl<T> QueuePtr<T> {
     #[inline(always)]
-    pub(crate) fn head(&self) -> &AtomicUsize {
+    pub fn head(&self) -> &AtomicUsize {
         unsafe { _field!(Queue, self.ptr, head.head.value, AtomicUsize).as_ref() }
     }
 
     #[inline(always)]
-    pub(crate) fn tail(&self) -> &AtomicUsize {
+    pub fn tail(&self) -> &AtomicUsize {
         unsafe { _field!(Queue, self.ptr, tail.tail.value, AtomicUsize).as_ref() }
     }
 }
@@ -75,7 +75,7 @@ impl<T> QueuePtr<T> {
 #[cfg(feature = "async")]
 impl<T> QueuePtr<T> {
     #[inline(always)]
-    pub(crate) fn register_sender_waker(&self, waker: &Waker) {
+    pub fn register_sender_waker(&self, waker: &Waker) {
         unsafe {
             _field!(Queue, self.ptr, tail.sender_waker.value, AtomicWaker)
                 .as_ref()
@@ -84,7 +84,7 @@ impl<T> QueuePtr<T> {
     }
 
     #[inline(always)]
-    pub(crate) fn register_receiver_waker(&self, waker: &Waker) {
+    pub fn register_receiver_waker(&self, waker: &Waker) {
         unsafe {
             _field!(Queue, self.ptr, head.receiver_waker.value, AtomicWaker)
                 .as_ref()

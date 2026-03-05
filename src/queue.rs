@@ -12,7 +12,8 @@ pub(crate) struct Queue<H, T> {
     rc: AtomicUsize,
 }
 
-pub(crate) trait DropInitItems<H, T, I> {
+pub trait DropInitItems<H, T, I> {
+    #[allow(clippy::missing_safety_doc)]
     unsafe fn drop_init_items(
         head: NonNull<H>,
         tail: NonNull<T>,
@@ -21,7 +22,7 @@ pub(crate) trait DropInitItems<H, T, I> {
     );
 }
 
-pub(crate) struct QueuePtr<H, T, I, G: DropInitItems<H, T, I>> {
+pub struct QueuePtr<H, T, I, G: DropInitItems<H, T, I>> {
     pub(crate) ptr: NonNull<Queue<H, T>>,
     pub(crate) buffer: NonNull<I>,
     pub(crate) size: usize,
