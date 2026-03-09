@@ -88,7 +88,7 @@ impl<T> Sender<T> {
 
         let cell = self.ptr.cell_at(tail);
         let mut backoff = crate::Backoff::with_spin_count(spin_count);
-        while cell.epoch().load(Ordering::Relaxed) != tail {
+        while cell.epoch().load(Ordering::Acquire) != tail {
             backoff.backoff();
         }
 
@@ -121,7 +121,7 @@ impl<T> Sender<T> {
 
         let cell = loop {
             let cell = self.ptr.cell_at(self.local_tail);
-            let epoch = cell.epoch().load(Ordering::Relaxed);
+            let epoch = cell.epoch().load(Ordering::Acquire);
 
             match epoch.cmp(&self.local_tail) {
                 // consumer hasn't read the value
