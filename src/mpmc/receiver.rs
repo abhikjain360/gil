@@ -126,7 +126,10 @@ impl<T> Receiver<T> {
             let next_epoch = self.local_head.wrapping_add(1);
 
             match epoch.cmp(&next_epoch) {
+                // producer hasn't written a new value since last read
                 Cmp::Less => return None,
+
+                // producer wrote a value
                 Cmp::Equal => {
                     match self.ptr.head().compare_exchange_weak(
                         self.local_head,
@@ -143,9 +146,13 @@ impl<T> Receiver<T> {
                             self.local_head = next_epoch;
                             return Some(ret);
                         }
+                        // we weren't fast enough, some other consumer read from this cell already,
+                        // probably
                         Err(cur_head) => self.local_head = cur_head,
                     }
                 }
+
+                // some other consumer has read from this cell before us
                 Cmp::Greater => self.local_head = self.ptr.head().load(Ordering::Relaxed),
             }
 

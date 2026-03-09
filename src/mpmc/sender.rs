@@ -129,17 +129,19 @@ impl<T> Sender<T> {
 
                 // consumer has read the value, cell is free
                 Cmp::Equal => {
-                    let next = self.local_tail.wrapping_add(1);
+                    let next_epoch = self.local_tail.wrapping_add(1);
                     match self.ptr.tail().compare_exchange_weak(
                         self.local_tail,
-                        next,
+                        next_epoch,
                         Ordering::Relaxed,
                         Ordering::Relaxed,
                     ) {
                         Ok(_) => {
-                            self.local_tail = next;
+                            self.local_tail = next_epoch;
                             break cell;
                         }
+                        // we weren't fast enough, some other producer wrote to this cell already,
+                        // probably
                         Err(cur_tail) => self.local_tail = cur_tail,
                     }
                 }
