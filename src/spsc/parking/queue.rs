@@ -87,12 +87,12 @@ impl<T> QueuePtr<T> {
 
     #[inline(always)]
     pub(super) fn futex_wake(&self) {
+        let futex = self.futex();
         // we need the data (tail or head) to be seen by the thread being woken up, and so we need
         // release or stronger ordering, and we can not load with release ordering
-        if self.futex().load(Ordering::SeqCst) != FutexState::None as u32 {
-            self.futex()
-                .store(FutexState::None as u32, Ordering::Relaxed);
-            atomic_wait::wake_one(self.futex())
+        if futex.load(Ordering::SeqCst) != FutexState::None as u32 {
+            futex.store(FutexState::None as u32, Ordering::Relaxed);
+            atomic_wait::wake_one(futex)
         }
     }
 }
