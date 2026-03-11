@@ -13,7 +13,7 @@ fn main() {
         let mut tx = tx.clone();
         spawn(move || {
             for i in 0..MESSAGES {
-                while tx.try_send(black_box(i)).is_err() {}
+                tx.send(black_box(i));
             }
         });
     }
@@ -23,9 +23,7 @@ fn main() {
 
     for _ in 0..(SENDERS * MESSAGES) {
         loop {
-            let Some(x) = rx.try_recv() else {
-                continue;
-            };
+            let x = rx.recv();
             black_box(x);
             break;
         }

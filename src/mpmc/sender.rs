@@ -1,6 +1,11 @@
 use core::cmp::Ordering as Cmp;
 
-use crate::{atomic::Ordering, mpmc::queue::QueuePtr};
+#[cfg(feature = "std")]
+use crate::mpmc::queue::FutexState;
+use crate::{
+    atomic::Ordering,
+    mpmc::queue::QueuePtr,
+};
 
 /// The producer end of the MPMC queue.
 ///
@@ -57,7 +62,7 @@ impl<T> Sender<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn send(&mut self, value: T) {
-        self.send_with_spin_count(value, 6, 10);
+        self.send_with_spin_count(value, 128, 1);
     }
 
     /// Sends a value into the queue, blocking if necessary, with custom backoff limits.
@@ -78,16 +83,24 @@ impl<T> Sender<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn send_with_spin_count(&mut self, mut value: T, spin_limit: u32, yield_limit: u32) {
-        let mut backoff = crate::ExponentialBackoff::new(spin_limit, yield_limit);
+        let mut backoff = crate::ParkingBackoff::new(spin_limit, yield_limit);
         loop {
-            match self.try_send(value) {
-                Ok(()) => return,
-                Err(ret) => {
-                    value = ret;
-                    if backoff.backoff() {
-                        backoff.reset();
+            if let Err(ret) = self.try_send(value) {
+                value = ret;
+                #[cfg(feature = "std")]
+                if backoff.backoff() && self.ptr.prepare_wait(FutexState::SendersWaiting) {
+                    // catch lost wakes
+                    if let Err(ret) = self.try_send(value) {
+                        value = ret;
+                        self.ptr.wait(FutexState::SendersWaiting);
+                    } else {
+                        return;
                     }
                 }
+                #[cfg(not(feature = "std"))]
+                backoff.backoff();
+            } else {
+                return;
             }
         }
     }
@@ -154,6 +167,9 @@ impl<T> Sender<T> {
 
         cell.set(value);
         cell.epoch().store(self.local_tail, Ordering::Release);
+
+        #[cfg(feature = "std")]
+        self.ptr.wake();
 
         Ok(())
     }

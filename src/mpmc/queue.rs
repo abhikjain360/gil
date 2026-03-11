@@ -1,5 +1,7 @@
 use core::marker::PhantomData;
 
+#[cfg(feature = "std")]
+use crate::atomic::AtomicU32;
 use crate::{
     atomic::{AtomicUsize, Ordering},
     cell::{Cell, CellPtr},
@@ -10,6 +12,8 @@ use crate::{
 #[repr(C)]
 pub(crate) struct Head {
     head: Padded<AtomicUsize>,
+    #[cfg(feature = "std")]
+    futex: Padded<AtomicU32>,
 }
 
 #[derive(Default)]
@@ -72,5 +76,50 @@ impl<T> QueuePtr<T> {
     #[inline(always)]
     pub(crate) fn cell_at(&self, index: usize) -> CellPtr<T> {
         self.at(index).into()
+    }
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone, Copy)]
+pub(super) enum FutexState {
+    ReceiversWaiting = -1,
+    Free = 0,
+    SendersWaiting = 1,
+}
+
+#[cfg(feature = "std")]
+impl<T> QueuePtr<T> {
+    #[inline(always)]
+    pub(super) fn futex(&self) -> &AtomicU32 {
+        unsafe { _field!(Queue, self.ptr, head.futex.value, AtomicU32).as_ref() }
+    }
+
+    #[inline(always)]
+    pub(super) fn prepare_wait(&self, value: FutexState) -> bool {
+        // TODO: figure out if we can get-by with cheaper ordering, but is also probably fine as we
+        //       were going to wait anyway so what is some extra syncing cost?
+        match self.futex().compare_exchange(
+            FutexState::Free as u32,
+            value as u32,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            Err(current) => current == value as u32,
+            Ok(_) => true,
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn wait(&self, value: FutexState) {
+        atomic_wait::wait(self.futex(), value as u32)
+    }
+
+    #[inline(always)]
+    pub(super) fn wake(&self) {
+        let futex = self.futex();
+        if futex.load(Ordering::Relaxed) != FutexState::Free as u32 {
+            futex.store(FutexState::Free as u32, Ordering::SeqCst);
+            atomic_wait::wake_all(futex);
+        }
     }
 }

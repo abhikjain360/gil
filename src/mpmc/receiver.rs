@@ -1,4 +1,9 @@
-use crate::{atomic::Ordering, mpmc::queue::QueuePtr};
+#[cfg(feature = "std")]
+use crate::mpmc::queue::FutexState;
+use crate::{
+    atomic::Ordering,
+    mpmc::queue::QueuePtr,
+};
 
 /// The consumer end of the MPMC queue.
 ///
@@ -55,7 +60,7 @@ impl<T> Receiver<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn recv(&mut self) -> T {
-        self.recv_with_spin_count(6, 10)
+        self.recv_with_spin_count(128, 1)
     }
 
     /// Receives a value from the queue, blocking if necessary, with custom
@@ -77,14 +82,21 @@ impl<T> Receiver<T> {
     /// assert_eq!(rx.recv_with_spin_count(4, 8), 42);
     /// ```
     pub fn recv_with_spin_count(&mut self, spin_limit: u32, yield_limit: u32) -> T {
-        let mut backoff = crate::ExponentialBackoff::new(spin_limit, yield_limit);
+        let mut backoff = crate::ParkingBackoff::new(spin_limit, yield_limit);
         loop {
             if let Some(ret) = self.try_recv() {
                 return ret;
             }
-            if backoff.backoff() {
-                backoff.reset();
+            #[cfg(feature = "std")]
+            if backoff.backoff() && self.ptr.prepare_wait(FutexState::ReceiversWaiting) {
+                // catch lost wakes
+                if let Some(ret) = self.try_recv() {
+                    return ret;
+                }
+                self.ptr.wait(FutexState::ReceiversWaiting);
             }
+            #[cfg(not(feature = "std"))]
+            backoff.backoff();
         }
     }
 
@@ -139,6 +151,10 @@ impl<T> Receiver<T> {
                                 self.local_head.wrapping_add(self.ptr.capacity),
                                 Ordering::Release,
                             );
+
+                            #[cfg(feature = "std")]
+                            self.ptr.wake();
+
                             self.local_head = next_epoch;
                             return Some(ret);
                         }

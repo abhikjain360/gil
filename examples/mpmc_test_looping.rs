@@ -5,7 +5,7 @@ fn main() {
     let (tx, rx) = channel(NonZeroUsize::new(4096).unwrap());
 
     const SENDERS: usize = 4;
-    const MESSAGES: usize = 50_000_000;
+    const MESSAGES: usize = 5_000_000;
 
     let start = Instant::now();
 
@@ -13,7 +13,7 @@ fn main() {
         let mut tx = tx.clone();
         spawn(move || {
             for i in 0..MESSAGES {
-                tx.send(black_box(i));
+                while tx.try_send(black_box(i)).is_err() {}
             }
         });
     }
@@ -26,8 +26,13 @@ fn main() {
         let mut rx = rx.clone();
         handles.push(spawn(move || {
             for _ in 0..MESSAGES {
-                let x = rx.recv();
-                black_box(x);
+                loop {
+                    let Some(x) = rx.try_recv() else {
+                        continue;
+                    };
+                    black_box(x);
+                    break;
+                }
             }
         }));
     }
