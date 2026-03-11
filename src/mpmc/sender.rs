@@ -58,7 +58,7 @@ impl<T> Sender<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn send(&mut self, value: T) {
-        self.send_with_spin_count(value, 128);
+        self.send_with_spin_count(value, 6);
     }
 
     /// Sends a value into the queue, blocking if necessary, using a custom spin count.
@@ -87,7 +87,7 @@ impl<T> Sender<T> {
         let next = tail.wrapping_add(1);
 
         let cell = self.ptr.cell_at(tail);
-        let mut backoff = crate::Backoff::with_spin_count(spin_count);
+        let mut backoff = crate::ExponentialBackoff::new(spin_count, spin_count + 4);
         while cell.epoch().load(Ordering::Acquire) != tail {
             backoff.backoff();
         }
@@ -117,7 +117,7 @@ impl<T> Sender<T> {
     /// assert_eq!(rx.recv(), 1);
     /// ```
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
-        let mut backoff = crate::Backoff::with_spin_count(16);
+        let mut backoff = crate::ExponentialBackoff::new(6, 10);
 
         let cell = loop {
             let cell = self.ptr.cell_at(self.local_tail);

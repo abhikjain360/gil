@@ -131,6 +131,53 @@ impl Backoff {
     }
 }
 
+/// An exponential backoff that doubles spin iterations each step.
+///
+/// 1. **Spin phase** (steps 0–6): spins `1 << step` times (1, 2, 4, …, 64).
+/// 2. **Yield phase** (steps 7–10): yields the thread.
+/// 3. Returns `true` once the yield budget is exhausted, signalling the caller
+///    to stop retrying.
+pub struct ExponentialBackoff {
+    step: u32,
+    spin_limit: u32,
+    yield_limit: u32,
+}
+
+impl ExponentialBackoff {
+    #[inline(always)]
+    pub fn new(spin_limit: u32, yield_limit: u32) -> Self {
+        Self {
+            step: 0,
+            spin_limit,
+            yield_limit,
+        }
+    }
+
+    /// Performs one backoff step. Returns `true` when the caller should give up.
+    #[inline(always)]
+    pub fn backoff(&mut self) -> bool {
+        if self.step <= self.spin_limit {
+            for _ in 0..(1 << self.step) {
+                crate::hint::spin_loop();
+            }
+        } else {
+            crate::thread::yield_now();
+        }
+
+        if self.step <= self.yield_limit {
+            self.step += 1;
+            false
+        } else {
+            true
+        }
+    }
+
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.step = 0;
+    }
+}
+
 /// A three-phase backoff strategy used by the parking queue variants.
 ///
 /// This backoff progresses through three phases before signalling the caller

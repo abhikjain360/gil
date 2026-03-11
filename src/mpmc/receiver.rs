@@ -56,7 +56,7 @@ impl<T> Receiver<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn recv(&mut self) -> T {
-        self.recv_with_spin_count(128)
+        self.recv_with_spin_count(6)
     }
 
     /// Receives a value from the queue, blocking if necessary, using a custom spin count.
@@ -85,7 +85,7 @@ impl<T> Receiver<T> {
         self.local_head = next;
 
         let cell = self.ptr.cell_at(head);
-        let mut backoff = crate::Backoff::with_spin_count(spin_count);
+        let mut backoff = crate::ExponentialBackoff::new(spin_count, spin_count + 4);
         while cell.epoch().load(Ordering::Acquire) != next {
             backoff.backoff();
         }
@@ -118,7 +118,7 @@ impl<T> Receiver<T> {
     pub fn try_recv(&mut self) -> Option<T> {
         use core::cmp::Ordering as Cmp;
 
-        let mut backoff = crate::Backoff::with_spin_count(16);
+        let mut backoff = crate::ExponentialBackoff::new(6, 10);
 
         loop {
             let cell = self.ptr.cell_at(self.local_head);
