@@ -1,6 +1,6 @@
 [package]
 name = "gil"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 authors = ["Abhik Jain <abhik@abhikjain.xyz>"]
 description = "A collection of high-performance, lock-free concurrent queues (SPSC, MPSC, MPMC, SPMC) with sync and async support"
