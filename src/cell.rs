@@ -1,8 +1,4 @@
-use core::{
-    mem::MaybeUninit,
-    ptr::NonNull,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use core::{mem::MaybeUninit, ptr::NonNull};
 
 use crate::atomic::AtomicUsize;
 
@@ -10,8 +6,6 @@ use crate::atomic::AtomicUsize;
 #[cfg_attr(all(target_arch = "aarch64", target_os = "macos"), repr(align(128)))]
 pub(crate) struct Cell<T> {
     pub(crate) epoch: AtomicUsize,
-    #[cfg(feature = "std")]
-    pub(crate) futex: AtomicU32,
     pub(crate) data: MaybeUninit<T>,
 }
 
@@ -43,35 +37,6 @@ impl<T> CellPtr<T> {
             unsafe {
                 core::ptr::drop_in_place(_field!(Cell<T>, self.ptr, data, T).as_ptr());
             }
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl<T> CellPtr<T> {
-    #[inline(always)]
-    pub(crate) fn futex(&self) -> &AtomicU32 {
-        unsafe { _field!(Cell<T>, self.ptr, futex, AtomicU32).as_ref() }
-    }
-
-    #[inline(always)]
-    pub(crate) fn prepare_wait(&self) -> bool {
-        self.futex()
-            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    #[inline(always)]
-    pub(crate) fn wait(&self) {
-        atomic_wait::wait(self.futex(), 1);
-    }
-
-    #[inline(always)]
-    pub(crate) fn wake(&self) {
-        let futex = self.futex();
-        if futex.load(Ordering::SeqCst) == 1 {
-            futex.store(0, Ordering::Relaxed);
-            atomic_wait::wake_all(futex);
         }
     }
 }

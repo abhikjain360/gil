@@ -1,7 +1,4 @@
-use crate::{
-    atomic::Ordering,
-    mpmc::queue::{FutexState, QueuePtr},
-};
+use crate::{atomic::Ordering, mpmc::queue::QueuePtr};
 
 /// The consumer end of the MPMC queue.
 ///
@@ -58,8 +55,8 @@ impl<T> Receiver<T> {
     /// tx.send(42);
     /// assert_eq!(rx.recv(), 42);
     /// ```
-    pub fn recv2(&mut self) -> T {
-        self.recv_with_spin_count(16)
+    pub fn recv(&mut self) -> T {
+        self.recv_with_spin_count(128)
     }
 
     /// Receives a value from the queue, blocking if necessary, using a custom spin count.
@@ -88,41 +85,16 @@ impl<T> Receiver<T> {
         self.local_head = next;
 
         let cell = self.ptr.cell_at(head);
-        let mut backoff = crate::ParkingBackoff::new(spin_count, 1);
+        let mut backoff = crate::Backoff::with_spin_count(spin_count);
         while cell.epoch().load(Ordering::Acquire) != next {
-            if backoff.backoff() && cell.prepare_wait() {
-                // don't lose wakes
-                if cell.epoch().load(Ordering::Acquire) == next {
-                    break;
-                }
-                cell.wait();
-            }
+            backoff.backoff();
         }
 
         let ret = unsafe { cell.get() };
         cell.epoch()
             .store(head.wrapping_add(self.ptr.capacity), Ordering::Release);
-        cell.wake();
 
         ret
-    }
-
-    pub fn recv(&mut self) -> T {
-        loop {
-            if let Some(ret) = self.try_recv() {
-                self.ptr.wake();
-                return ret;
-            }
-
-            if self.ptr.prepare_wait(FutexState::ReceiversWaiting) {
-                // catch lost wakeups
-                if let Some(ret) = self.try_recv() {
-                    self.ptr.wake();
-                    return ret;
-                }
-                self.ptr.wait(FutexState::ReceiversWaiting);
-            }
-        }
     }
 
     /// Attempts to receive a value from the queue without blocking.
@@ -171,8 +143,6 @@ impl<T> Receiver<T> {
                                 self.local_head.wrapping_add(self.ptr.capacity),
                                 Ordering::Release,
                             );
-                            // cell.wake();
-
                             self.local_head = next_epoch;
                             return Some(ret);
                         }

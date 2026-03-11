@@ -1,4 +1,4 @@
-use core::{marker::PhantomData, sync::atomic::AtomicU32};
+use core::marker::PhantomData;
 
 use crate::{
     atomic::{AtomicUsize, Ordering},
@@ -10,8 +10,6 @@ use crate::{
 #[repr(C)]
 pub(crate) struct Head {
     head: Padded<AtomicUsize>,
-    #[cfg(feature = "std")]
-    futex: Padded<AtomicU32>,
 }
 
 #[derive(Default)]
@@ -74,47 +72,5 @@ impl<T> QueuePtr<T> {
     #[inline(always)]
     pub(crate) fn cell_at(&self, index: usize) -> CellPtr<T> {
         self.at(index).into()
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum FutexState {
-    ReceiversWaiting = -1,
-    Free = 0,
-    SendersWaiting = 1,
-}
-
-#[cfg(feature = "std")]
-impl<T> QueuePtr<T> {
-    #[inline(always)]
-    pub(crate) fn futex(&self) -> &AtomicU32 {
-        unsafe { _field!(Queue, self.ptr, head.futex, AtomicU32).as_ref() }
-    }
-
-    #[inline(always)]
-    pub(crate) fn prepare_wait(&self, value: FutexState) -> bool {
-        match self.futex().compare_exchange(
-            FutexState::Free as u32,
-            value as u32,
-            Ordering::SeqCst,
-            Ordering::Relaxed,
-        ) {
-            Err(curr) => return curr == value as u32 || curr == FutexState::Free as u32,
-            Ok(_) => return true,
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn wait(&self, value: FutexState) {
-        atomic_wait::wait(self.futex(), value as u32);
-    }
-
-    #[inline(always)]
-    pub(crate) fn wake(&self) {
-        let futex = self.futex();
-        if futex.load(Ordering::SeqCst) != FutexState::Free as u32 {
-            futex.store(FutexState::Free as u32, Ordering::Relaxed);
-            atomic_wait::wake_one(futex);
-        }
     }
 }

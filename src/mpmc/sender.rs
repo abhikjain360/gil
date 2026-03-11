@@ -1,9 +1,6 @@
 use core::cmp::Ordering as Cmp;
 
-use crate::{
-    atomic::Ordering,
-    mpmc::queue::{FutexState, QueuePtr},
-};
+use crate::{atomic::Ordering, mpmc::queue::QueuePtr};
 
 /// The producer end of the MPMC queue.
 ///
@@ -60,8 +57,8 @@ impl<T> Sender<T> {
     /// tx.send(42);
     /// assert_eq!(rx.recv(), 42);
     /// ```
-    pub fn send2(&mut self, value: T) {
-        self.send_with_spin_count(value, 16);
+    pub fn send(&mut self, value: T) {
+        self.send_with_spin_count(value, 128);
     }
 
     /// Sends a value into the queue, blocking if necessary, using a custom spin count.
@@ -90,38 +87,14 @@ impl<T> Sender<T> {
         let next = tail.wrapping_add(1);
 
         let cell = self.ptr.cell_at(tail);
-        let mut backoff = crate::ParkingBackoff::new(spin_count, 1);
+        let mut backoff = crate::Backoff::with_spin_count(spin_count);
         while cell.epoch().load(Ordering::Acquire) != tail {
-            if backoff.backoff() && cell.prepare_wait() {
-                // don't lose wakes
-                if cell.epoch().load(Ordering::Acquire) == tail {
-                    break;
-                }
-                cell.wait();
-            }
+            backoff.backoff();
         }
 
         cell.set(value);
         cell.epoch().store(next, Ordering::Release);
-        cell.wake();
-
         self.local_tail = next;
-    }
-
-    pub fn send(&mut self, mut value: T) {
-        while let Err(ret) = self.try_send(value) {
-            value = ret;
-            if self.ptr.prepare_wait(FutexState::SendersWaiting) {
-                // catch lost wakeups
-                if let Err(ret) = self.try_send(value) {
-                    value = ret;
-                    self.ptr.wait(FutexState::SendersWaiting);
-                    continue;
-                }
-                break;
-            }
-        }
-        self.ptr.wake();
     }
 
     /// Attempts to send a value into the queue without blocking.
@@ -182,7 +155,6 @@ impl<T> Sender<T> {
 
         cell.set(value);
         cell.epoch().store(self.local_tail, Ordering::Release);
-        // cell.wake();
 
         Ok(())
     }

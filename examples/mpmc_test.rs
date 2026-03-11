@@ -1,5 +1,3 @@
-#![allow(unused_variables)]
-
 use gil::mpmc::channel;
 use std::{hint::black_box, num::NonZeroUsize, thread::spawn, time::SystemTime};
 
@@ -7,15 +5,16 @@ fn main() {
     let (tx, rx) = channel(NonZeroUsize::new(4096).unwrap());
 
     const SENDERS: usize = 4;
+    const RECEIVERS: usize = 4;
     const MESSAGES: usize = 5_000_000;
 
     let start = SystemTime::now();
 
-    for thread in 0..SENDERS {
+    for _ in 0..SENDERS {
         let mut tx = tx.clone();
         spawn(move || {
             for i in 0..MESSAGES {
-                while tx.try_send(black_box(i)).is_err() {}
+                tx.send(black_box(i));
             }
         });
     }
@@ -23,18 +22,13 @@ fn main() {
     // Drop the original sender since we've cloned it for all threads
     drop(tx);
 
-    let mut handles = Vec::with_capacity(SENDERS);
-    for thread in 0..SENDERS {
+    let mut handles = Vec::with_capacity(RECEIVERS);
+    for _ in 0..RECEIVERS {
         let mut rx = rx.clone();
         handles.push(spawn(move || {
-            for i in 0..MESSAGES {
-                loop {
-                    let Some(x) = rx.try_recv() else {
-                        continue;
-                    };
-                    black_box(x);
-                    break;
-                }
+            for _ in 0..(SENDERS * MESSAGES / RECEIVERS) {
+                let x = rx.recv();
+                black_box(x);
             }
         }));
     }
@@ -47,8 +41,5 @@ fn main() {
     }
 
     let time = start.elapsed().unwrap();
-    println!(
-        "time={time:?}\nmil/s={throughput:.2}",
-        throughput = MESSAGES as f64 / 1_000_000.0 / time.as_secs_f64()
-    );
+    println!("{time:?}");
 }
