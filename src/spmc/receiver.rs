@@ -40,10 +40,9 @@ impl<T> Receiver<T> {
 
     /// Receives a value from the queue, blocking if necessary.
     ///
-    /// This method uses a spin loop with a default spin count of 128 to wait
-    /// for a value to become available. For control over the spin count, use
-    /// [`Receiver::recv_with_spin_count`]. For a non-blocking alternative, use
-    /// [`Receiver::try_recv`].
+    /// Spins in a loop calling [`try_recv`](Receiver::try_recv) with exponential
+    /// backoff (spin limit 6, yield limit 10). For custom limits, use
+    /// [`recv_with_spin_count`](Receiver::recv_with_spin_count).
     ///
     /// When multiple receivers exist, each call to `recv` competes with other receivers.
     /// Exactly one receiver will get each item.
@@ -59,21 +58,19 @@ impl<T> Receiver<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn recv(&mut self) -> T {
-        self.recv_with_spin_count(128)
+        self.recv_with_spin_count(6, 10)
     }
 
-    /// Receives a value from the queue, blocking if necessary, using a custom spin count.
+    /// Receives a value from the queue, blocking if necessary, with custom
+    /// backoff limits.
     ///
-    /// The `spin_count` controls how many times the backoff spins before yielding
-    /// the thread. A higher value keeps the thread spinning longer, which can reduce
-    /// latency when the queue is expected to fill quickly, at the cost of higher CPU
-    /// usage. A lower value yields sooner, reducing CPU usage but potentially
-    /// increasing latency.
+    /// Retries [`try_recv`](Receiver::try_recv) in a loop with exponential backoff
+    /// between attempts. `spin_limit` controls how many doubling spin phases
+    /// occur before yielding, and `yield_limit` controls the total number of
+    /// backoff steps before the backoff resets.
     ///
     /// When multiple receivers exist, each call competes with other receivers.
     /// Exactly one receiver will get each item.
-    ///
-    /// For a non-blocking alternative, use [`Receiver::try_recv`].
     ///
     /// # Examples
     ///
@@ -83,23 +80,18 @@ impl<T> Receiver<T> {
     ///
     /// let (mut tx, mut rx) = channel::<i32>(NonZeroUsize::new(16).unwrap());
     /// tx.send(42);
-    /// assert_eq!(rx.recv_with_spin_count(32), 42);
+    /// assert_eq!(rx.recv_with_spin_count(4, 8), 42);
     /// ```
-    pub fn recv_with_spin_count(&mut self, spin_count: u32) -> T {
-        let head = self.ptr.head().fetch_add(1, Ordering::Relaxed);
-        let next_head = head.wrapping_add(1);
-
-        let cell = self.ptr.cell_at(head);
-        let mut backoff = crate::Backoff::with_spin_count(spin_count);
-        while cell.epoch().load(Ordering::Acquire) != next_head {
-            backoff.backoff();
+    pub fn recv_with_spin_count(&mut self, spin_limit: u32, yield_limit: u32) -> T {
+        let mut backoff = crate::ExponentialBackoff::new(spin_limit, yield_limit);
+        loop {
+            if let Some(ret) = self.try_recv() {
+                return ret;
+            }
+            if backoff.backoff() {
+                backoff.reset();
+            }
         }
-
-        let ret = unsafe { cell.get() };
-        cell.epoch()
-            .store(head.wrapping_add(self.ptr.capacity), Ordering::Release);
-
-        ret
     }
 
     /// Attempts to receive a value from the queue without blocking.
@@ -124,7 +116,7 @@ impl<T> Receiver<T> {
     pub fn try_recv(&mut self) -> Option<T> {
         use core::cmp::Ordering as Cmp;
 
-        let mut backoff = crate::Backoff::with_spin_count(16);
+        let mut backoff = crate::ExponentialBackoff::new(6, 10);
         loop {
             let cell = self.ptr.cell_at(self.local_head);
             let epoch = cell.epoch().load(Ordering::Acquire);

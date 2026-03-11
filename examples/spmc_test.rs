@@ -4,8 +4,8 @@ use std::{hint::black_box, num::NonZeroUsize, thread::spawn, time::SystemTime};
 fn main() {
     let (mut tx, rx) = channel(NonZeroUsize::new(4096).unwrap());
 
-    const RECEIVERS: usize = 8;
-    const MESSAGES: usize = 1_000_000;
+    const RECEIVERS: usize = 4;
+    const MESSAGES: usize = 5_000_000;
 
     let start = SystemTime::now();
 
@@ -14,8 +14,13 @@ fn main() {
         let mut rx = rx.clone();
         handles.push(spawn(move || {
             for _ in 0..MESSAGES {
-                let x = rx.recv();
-                black_box(x);
+                loop {
+                    let Some(x) = rx.try_recv() else {
+                        continue;
+                    };
+                    black_box(x);
+                    break;
+                }
             }
         }));
     }
@@ -24,7 +29,7 @@ fn main() {
     drop(rx);
 
     for i in 0..(RECEIVERS * MESSAGES) {
-        tx.send(black_box(i));
+        while tx.try_send(black_box(i)).is_err() {}
     }
 
     for handle in handles {
@@ -32,5 +37,8 @@ fn main() {
     }
 
     let time = start.elapsed().unwrap();
-    println!("{time:?}");
+    println!(
+        "time={time:?}\nmil/s={throughput:.2}",
+        throughput = MESSAGES as f64 / 1_000_000.0 / time.as_secs_f64()
+    );
 }

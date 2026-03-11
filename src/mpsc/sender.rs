@@ -40,10 +40,9 @@ impl<T> Sender<T> {
 
     /// Sends a value into the queue, blocking if necessary.
     ///
-    /// This method uses a spin loop with a default spin count of 128 to wait
-    /// for available space in the queue. For control over the spin count, use
-    /// [`Sender::send_with_spin_count`]. For a non-blocking alternative, use
-    /// [`Sender::try_send`].
+    /// Spins in a loop calling [`try_send`](Sender::try_send) with exponential
+    /// backoff (spin limit 6, yield limit 10). For custom limits, use
+    /// [`send_with_spin_count`](Sender::send_with_spin_count).
     ///
     /// # Examples
     ///
@@ -56,18 +55,16 @@ impl<T> Sender<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn send(&mut self, value: T) {
-        self.send_with_spin_count(value, 128);
+        self.send_with_spin_count(value, 6, 10);
     }
 
-    /// Sends a value into the queue, blocking if necessary, using a custom spin count.
+    /// Sends a value into the queue, blocking if necessary, with custom
+    /// backoff limits.
     ///
-    /// The `spin_count` controls how many times the backoff spins before yielding
-    /// the thread. A higher value keeps the thread spinning longer, which can reduce
-    /// latency when the queue is expected to drain quickly, at the cost of higher CPU
-    /// usage. A lower value yields sooner, reducing CPU usage but potentially
-    /// increasing latency.
-    ///
-    /// For a non-blocking alternative, use [`Sender::try_send`].
+    /// Retries [`try_send`](Sender::try_send) in a loop with exponential backoff
+    /// between attempts. `spin_limit` controls how many doubling spin phases
+    /// occur before yielding, and `yield_limit` controls the total number of
+    /// backoff steps before the backoff resets.
     ///
     /// # Examples
     ///
@@ -76,29 +73,29 @@ impl<T> Sender<T> {
     /// use gil::mpsc::channel;
     ///
     /// let (mut tx, mut rx) = channel::<i32>(NonZeroUsize::new(16).unwrap());
-    /// tx.send_with_spin_count(42, 32);
+    /// tx.send_with_spin_count(42, 4, 8);
     /// assert_eq!(rx.recv(), 42);
     /// ```
-    pub fn send_with_spin_count(&mut self, value: T, spin_count: u32) {
-        // fetch_add means we are the only ones who can access the cell at this idx
-        let tail = self.ptr.tail().fetch_add(1, Ordering::Relaxed);
-        let next = tail.wrapping_add(1);
-
-        let cell = self.ptr.cell_at(tail);
-        let mut backoff = crate::Backoff::with_spin_count(spin_count);
-        while cell.epoch().load(Ordering::Acquire) != tail {
-            backoff.backoff();
+    pub fn send_with_spin_count(&mut self, mut value: T, spin_limit: u32, yield_limit: u32) {
+        let mut backoff = crate::ExponentialBackoff::new(spin_limit, yield_limit);
+        loop {
+            match self.try_send(value) {
+                Ok(()) => return,
+                Err(ret) => {
+                    value = ret;
+                    if backoff.backoff() {
+                        backoff.reset();
+                    }
+                }
+            }
         }
-
-        cell.set(value);
-        cell.epoch().store(next, Ordering::Release);
-        self.local_tail = next;
     }
 
     /// Attempts to send a value into the queue without blocking.
     ///
-    /// Returns `Ok(())` if the value was successfully enqueued, or `Err(value)` if the
-    /// queue is full, returning the original value.
+    /// Uses exponential backoff (spin limit 6, yield limit 10) to handle CAS
+    /// contention between producers. Returns `Ok(())` if the value was
+    /// successfully enqueued, or `Err(value)` if the queue is full.
     ///
     /// # Examples
     ///
@@ -117,7 +114,7 @@ impl<T> Sender<T> {
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
         use core::cmp::Ordering as Cmp;
 
-        let mut backoff = crate::Backoff::with_spin_count(16);
+        let mut backoff = crate::ExponentialBackoff::new(6, 10);
 
         let cell = loop {
             let cell = self.ptr.cell_at(self.local_tail);
