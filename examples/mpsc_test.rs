@@ -22,11 +22,8 @@ fn main() {
     drop(tx);
 
     for _ in 0..(SENDERS * MESSAGES) {
-        loop {
-            let x = rx.recv();
-            black_box(x);
-            break;
-        }
+        let x = rx.recv();
+        black_box(x);
     }
 
     let time = start.elapsed().unwrap();
