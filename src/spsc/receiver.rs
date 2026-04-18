@@ -198,23 +198,22 @@ impl<T> Receiver<T> {
     /// ```
     #[cfg(feature = "async")]
     pub async fn recv_async(&mut self) -> T {
-        use core::task::Poll;
+        futures::future::poll_fn(|cx| self.poll_recv(cx)).await
+    }
 
+    #[cfg(feature = "async")]
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<T> {
         if self.local_head == self.local_tail {
-            futures::future::poll_fn(|ctx| {
-                self.load_tail();
-                if self.local_head == self.local_tail {
-                    self.ptr.register_receiver_waker(ctx.waker());
+            self.load_tail();
+            if self.local_head == self.local_tail {
+                self.ptr.register_receiver_waker(cx.waker());
 
-                    // prevent lost wake
-                    self.local_tail = self.ptr.tail().load(Ordering::SeqCst);
-                    if self.local_head == self.local_tail {
-                        return Poll::Pending;
-                    }
+                // prevent lost wake
+                self.local_tail = self.ptr.tail().load(Ordering::SeqCst);
+                if self.local_head == self.local_tail {
+                    return Poll::Pending;
                 }
-                Poll::Ready(())
-            })
-            .await;
+            }
         }
 
         // SAFETY: head != tail which means queue is not empty and head has valid initialised
@@ -223,10 +222,9 @@ impl<T> Receiver<T> {
         let new_head = self.local_head.wrapping_add(1);
         self.store_head(new_head);
         self.local_head = new_head;
-
         self.ptr.wake_sender();
 
-        ret
+        Poll::Ready(ret)
     }
 
     #[inline(always)]
@@ -266,17 +264,7 @@ impl<T> futures::Stream for Receiver<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(v) = self.try_recv() {
-            return Poll::Ready(Some(v));
-        }
-
-        self.ptr.register_receiver_waker(cx.waker());
-        self.local_tail = self.ptr.tail().load(Ordering::SeqCst);
-        if let Some(v) = self.try_recv() {
-            return Poll::Ready(Some(v));
-        }
-
-        Poll::Pending
+        self.poll_recv(cx).map(Some)
     }
 }
 
