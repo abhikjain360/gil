@@ -53,7 +53,7 @@ where
     G: DropInitItems<H, T, I>,
 {
     pub(crate) fn with_size(size: NonZeroUsize) -> Self {
-        // Allocate exactly capacity + 1 slots (one slot is always empty to distinguish full from empty)
+        // Round up to power of 2 so we can use mask
         let size = size.get();
         let capacity = size.next_power_of_two();
 
