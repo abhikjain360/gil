@@ -72,22 +72,21 @@ impl<T> Sender<T> {
     /// After a brief spin and yield phase, the sender parks on a shared futex.
     /// The receiver wakes parked senders after draining items.
     pub fn send(&mut self, value: T) {
-        let new_tail = self.local_tail.wrapping_add(1);
-
         let mut backoff = crate::ParkingBackoff::new(16, 4);
-        while new_tail > self.max_tail() {
+        while self.is_full() {
             if backoff.backoff() {
                 // Announce intent to park (Dekker pattern)
                 self.futex().store(1, Ordering::SeqCst);
                 // Recheck after announcing
                 self.load_head();
-                if new_tail > self.max_tail() {
+                if self.is_full() {
                     atomic_wait::wait(self.futex(), 1);
                 }
             }
             self.load_head();
         }
 
+        let new_tail = self.local_tail.wrapping_add(1);
         unsafe { self.ptr.set(self.local_tail, value) };
         self.store_tail(new_tail);
         self.local_tail = new_tail;
@@ -97,15 +96,14 @@ impl<T> Sender<T> {
     ///
     /// Returns `Ok(())` if the value was sent, or `Err(value)` if the shard's queue is full.
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
-        let new_tail = self.local_tail.wrapping_add(1);
-
-        if new_tail > self.max_tail() {
+        if self.is_full() {
             self.load_head();
-            if new_tail > self.max_tail() {
+            if self.is_full() {
                 return Err(value);
             }
         }
 
+        let new_tail = self.local_tail.wrapping_add(1);
         unsafe { self.ptr.set(self.local_tail, value) };
         self.store_tail(new_tail);
         self.local_tail = new_tail;
@@ -164,8 +162,8 @@ impl<T> Sender<T> {
     }
 
     #[inline(always)]
-    fn max_tail(&self) -> usize {
-        self.local_head.wrapping_add(self.ptr.size)
+    fn is_full(&self) -> bool {
+        self.local_tail.wrapping_sub(self.local_head) >= self.ptr.size
     }
 
     #[inline(always)]

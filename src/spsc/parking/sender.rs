@@ -61,15 +61,14 @@ impl<T> Sender<T> {
     /// assert!(tx.try_send(3).is_ok());
     /// ```
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
-        let new_tail = self.local_tail.wrapping_add(1);
-
-        if new_tail > self.max_tail() {
+        if self.is_full() {
             self.load_head();
-            if new_tail > self.max_tail() {
+            if self.is_full() {
                 return Err(value);
             }
         }
 
+        let new_tail = self.local_tail.wrapping_add(1);
         unsafe { self.ptr.set(self.local_tail, value) };
         self.store_tail(new_tail);
         self.local_tail = new_tail;
@@ -97,20 +96,19 @@ impl<T> Sender<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn send(&mut self, value: T) {
-        let new_tail = self.local_tail.wrapping_add(1);
-
         let mut backoff = crate::ParkingBackoff::new(16, 4);
-        while new_tail > self.max_tail() {
+        while self.is_full() {
             if backoff.backoff() && self.ptr.futex_store(FutexState::SenderWaiting) {
                 // catch lost unparks first before trying to park self
                 self.load_head();
-                if new_tail > self.max_tail() {
+                if self.is_full() {
                     self.ptr.futex_wait(FutexState::SenderWaiting);
                 }
             };
             self.load_head();
         }
 
+        let new_tail = self.local_tail.wrapping_add(1);
         unsafe { self.ptr.set(self.local_tail, value) };
         self.store_tail(new_tail);
         self.local_tail = new_tail;
@@ -222,8 +220,8 @@ impl<T> Sender<T> {
     }
 
     #[inline(always)]
-    fn max_tail(&self) -> usize {
-        self.local_head.wrapping_add(self.ptr.size)
+    fn is_full(&self) -> bool {
+        self.local_tail.wrapping_sub(self.local_head) >= self.ptr.size
     }
 
     #[inline(always)]

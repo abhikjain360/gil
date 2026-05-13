@@ -58,15 +58,14 @@ impl<T> Sender<T> {
     /// assert!(tx.try_send(3).is_ok());
     /// ```
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
-        let new_tail = self.local_tail.wrapping_add(1);
-
-        if new_tail > self.max_tail() {
+        if self.is_full() {
             self.load_head();
-            if new_tail > self.max_tail() {
+            if self.is_full() {
                 return Err(value);
             }
         }
 
+        let new_tail = self.local_tail.wrapping_add(1);
         unsafe { self.ptr.set(self.local_tail, value) };
         self.store_tail(new_tail);
         self.local_tail = new_tail;
@@ -121,14 +120,13 @@ impl<T> Sender<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn send_with_spin_count(&mut self, value: T, spin_count: u32) {
-        let new_tail = self.local_tail.wrapping_add(1);
-
         let mut backoff = crate::Backoff::with_spin_count(spin_count);
-        while new_tail > self.max_tail() {
+        while self.is_full() {
             backoff.backoff();
             self.load_head();
         }
 
+        let new_tail = self.local_tail.wrapping_add(1);
         unsafe { self.ptr.set(self.local_tail, value) };
         self.store_tail(new_tail);
         self.local_tail = new_tail;
@@ -158,17 +156,15 @@ impl<T> Sender<T> {
     pub async fn send_async(&mut self, value: T) {
         use core::task::Poll;
 
-        let new_tail = self.local_tail.wrapping_add(1);
-
-        if new_tail > self.max_tail() {
+        if self.is_full() {
             futures::future::poll_fn(|ctx| {
                 self.load_head();
-                if new_tail > self.max_tail() {
+                if self.is_full() {
                     self.ptr.register_sender_waker(ctx.waker());
 
                     // prevent lost wake
                     self.local_head = self.ptr.head().load(Ordering::SeqCst);
-                    if new_tail > self.max_tail() {
+                    if self.is_full() {
                         return Poll::Pending;
                     }
                 }
@@ -177,6 +173,7 @@ impl<T> Sender<T> {
             .await;
         }
 
+        let new_tail = self.local_tail.wrapping_add(1);
         unsafe { self.ptr.set(self.local_tail, value) };
         self.store_tail(new_tail);
         self.local_tail = new_tail;
@@ -289,8 +286,8 @@ impl<T> Sender<T> {
     }
 
     #[inline(always)]
-    fn max_tail(&self) -> usize {
-        self.local_head.wrapping_add(self.ptr.size)
+    fn is_full(&self) -> bool {
+        self.local_tail.wrapping_sub(self.local_head) >= self.ptr.size
     }
 
     #[inline(always)]

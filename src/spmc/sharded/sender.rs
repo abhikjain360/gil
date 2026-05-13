@@ -39,14 +39,14 @@ impl<T> Sender<T> {
     /// Sends a value to the next shard in round-robin order, blocking if that shard is full.
     pub fn send(&mut self, value: T) {
         let shard = self.next_shard;
-        let new_tail = self.local_tails[shard].wrapping_add(1);
 
         let mut backoff = Backoff::with_spin_count(128);
-        while new_tail > self.max_tail(shard) {
+        while self.is_full(shard) {
             backoff.backoff();
             self.load_head(shard);
         }
 
+        let new_tail = self.local_tails[shard].wrapping_add(1);
         unsafe { self.ptrs[shard].set(self.local_tails[shard], value) };
         self.store_tail(shard, new_tail);
         self.local_tails[shard] = new_tail;
@@ -62,15 +62,15 @@ impl<T> Sender<T> {
     /// Returns `Err(value)` if the current target shard is full.
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
         let shard = self.next_shard;
-        let new_tail = self.local_tails[shard].wrapping_add(1);
 
-        if new_tail > self.max_tail(shard) {
+        if self.is_full(shard) {
             self.load_head(shard);
-            if new_tail > self.max_tail(shard) {
+            if self.is_full(shard) {
                 return Err(value);
             }
         }
 
+        let new_tail = self.local_tails[shard].wrapping_add(1);
         unsafe { self.ptrs[shard].set(self.local_tails[shard], value) };
         self.store_tail(shard, new_tail);
         self.local_tails[shard] = new_tail;
@@ -141,8 +141,8 @@ impl<T> Sender<T> {
     }
 
     #[inline(always)]
-    fn max_tail(&self, shard: usize) -> usize {
-        self.local_heads[shard].wrapping_add(self.ptrs[shard].size)
+    fn is_full(&self, shard: usize) -> bool {
+        self.local_tails[shard].wrapping_sub(self.local_heads[shard]) >= self.ptrs[shard].size
     }
 
     #[inline(always)]
