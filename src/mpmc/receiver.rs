@@ -1,9 +1,6 @@
 #[cfg(feature = "std")]
 use crate::mpmc::queue::FutexState;
-use crate::{
-    atomic::Ordering,
-    mpmc::queue::QueuePtr,
-};
+use crate::{atomic::Ordering, mpmc::queue::QueuePtr};
 
 /// The consumer end of the MPMC queue.
 ///
