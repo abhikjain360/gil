@@ -3,13 +3,13 @@ use std::{
     num::NonZeroUsize,
     sync::{Arc, Barrier},
     thread::spawn,
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 
-use criterion::{
-    BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
-};
+use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, measurement::WallTime};
 use gil::spmc::sharded_parking::channel;
+
+mod support;
 
 /// A 1024-byte payload for benchmarking large object transfers
 #[derive(Clone, Copy)]
@@ -26,12 +26,8 @@ impl Payload1024 {
 }
 
 fn make_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
-    let mut group = c.benchmark_group(name);
-    group.measurement_time(Duration::from_secs(3));
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
-
-    group
+    let group = c.benchmark_group(name);
+    support::configure_group(group)
 }
 
 fn benchmark(c: &mut Criterion) {
@@ -57,15 +53,14 @@ fn benchmark(c: &mut Criterion) {
                             channel::<u8>(NonZeroUsize::new(receiver_count).unwrap(), size);
 
                         let barrier = Arc::new(Barrier::new(receiver_count + 1));
-                        let messages_per_receiver = iter / receiver_count;
-
                         let mut handles = Vec::with_capacity(receiver_count);
-                        for _ in 0..receiver_count - 1 {
+                        for receiver_id in 1..receiver_count {
                             let mut rx_clone = rx.clone().unwrap();
                             let barrier_clone = Arc::clone(&barrier);
+                            let messages = support::work_items(iter, receiver_id, receiver_count);
                             handles.push(spawn(move || {
                                 barrier_clone.wait();
-                                for _ in 0..messages_per_receiver {
+                                for _ in 0..messages {
                                     black_box(rx_clone.recv());
                                 }
                             }));
@@ -73,9 +68,10 @@ fn benchmark(c: &mut Criterion) {
 
                         let mut rx = rx;
                         let barrier_clone = Arc::clone(&barrier);
+                        let messages = support::work_items(iter, 0, receiver_count);
                         handles.push(spawn(move || {
                             barrier_clone.wait();
-                            for _ in 0..messages_per_receiver {
+                            for _ in 0..messages {
                                 black_box(rx.recv());
                             }
                         }));
@@ -83,7 +79,7 @@ fn benchmark(c: &mut Criterion) {
                         barrier.wait();
                         let start = SystemTime::now();
 
-                        for _ in 0..(messages_per_receiver * receiver_count) {
+                        for _ in 0..iter {
                             tx.send(black_box(0u8));
                         }
 
@@ -108,15 +104,14 @@ fn benchmark(c: &mut Criterion) {
                             channel::<usize>(NonZeroUsize::new(receiver_count).unwrap(), size);
 
                         let barrier = Arc::new(Barrier::new(receiver_count + 1));
-                        let messages_per_receiver = iter / receiver_count;
-
                         let mut handles = Vec::with_capacity(receiver_count);
-                        for _ in 0..receiver_count - 1 {
+                        for receiver_id in 1..receiver_count {
                             let mut rx_clone = rx.clone().unwrap();
                             let barrier_clone = Arc::clone(&barrier);
+                            let messages = support::work_items(iter, receiver_id, receiver_count);
                             handles.push(spawn(move || {
                                 barrier_clone.wait();
-                                for _ in 0..messages_per_receiver {
+                                for _ in 0..messages {
                                     black_box(rx_clone.recv());
                                 }
                             }));
@@ -124,9 +119,10 @@ fn benchmark(c: &mut Criterion) {
 
                         let mut rx = rx;
                         let barrier_clone = Arc::clone(&barrier);
+                        let messages = support::work_items(iter, 0, receiver_count);
                         handles.push(spawn(move || {
                             barrier_clone.wait();
-                            for _ in 0..messages_per_receiver {
+                            for _ in 0..messages {
                                 black_box(rx.recv());
                             }
                         }));
@@ -134,7 +130,7 @@ fn benchmark(c: &mut Criterion) {
                         barrier.wait();
                         let start = SystemTime::now();
 
-                        for _ in 0..(messages_per_receiver * receiver_count) {
+                        for _ in 0..iter {
                             tx.send(black_box(0usize));
                         }
 
@@ -161,15 +157,14 @@ fn benchmark(c: &mut Criterion) {
                         );
 
                         let barrier = Arc::new(Barrier::new(receiver_count + 1));
-                        let messages_per_receiver = iter / receiver_count;
-
                         let mut handles = Vec::with_capacity(receiver_count);
-                        for _ in 0..receiver_count - 1 {
+                        for receiver_id in 1..receiver_count {
                             let mut rx_clone = rx.clone().unwrap();
                             let barrier_clone = Arc::clone(&barrier);
+                            let messages = support::work_items(iter, receiver_id, receiver_count);
                             handles.push(spawn(move || {
                                 barrier_clone.wait();
-                                for _ in 0..messages_per_receiver {
+                                for _ in 0..messages {
                                     black_box(rx_clone.recv());
                                 }
                             }));
@@ -177,9 +172,10 @@ fn benchmark(c: &mut Criterion) {
 
                         let mut rx = rx;
                         let barrier_clone = Arc::clone(&barrier);
+                        let messages = support::work_items(iter, 0, receiver_count);
                         handles.push(spawn(move || {
                             barrier_clone.wait();
-                            for _ in 0..messages_per_receiver {
+                            for _ in 0..messages {
                                 black_box(rx.recv());
                             }
                         }));
@@ -187,7 +183,7 @@ fn benchmark(c: &mut Criterion) {
                         barrier.wait();
                         let start = SystemTime::now();
 
-                        for _ in 0..(messages_per_receiver * receiver_count) {
+                        for _ in 0..iter {
                             tx.send(black_box(Payload1024::new(0)));
                         }
 
@@ -206,7 +202,7 @@ fn benchmark(c: &mut Criterion) {
     drop(group);
 
     // ==================== THROUGHPUT ====================
-    const ELEMENTS: usize = 1_000_000;
+    const ELEMENTS: usize = 262_144;
 
     // Throughput for usize (8 bytes)
     {
@@ -331,7 +327,7 @@ fn benchmark(c: &mut Criterion) {
 
     // Throughput for 1024-byte payload
     {
-        const LARGE_ELEMENTS: usize = 100_000;
+        const LARGE_ELEMENTS: usize = 65_536;
         let mut group = make_group(c, "spmc/sharded_parking/throughput/payload_1024");
         group.throughput(Throughput::ElementsAndBytes {
             elements: LARGE_ELEMENTS as u64,
@@ -460,4 +456,8 @@ fn benchmark(c: &mut Criterion) {
 }
 
 criterion_group! {benches, benchmark}
-criterion_main! {benches}
+
+fn main() {
+    support::install_timeout();
+    benches();
+}

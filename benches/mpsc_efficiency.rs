@@ -8,6 +8,8 @@ use std::{hint::black_box, num::NonZeroUsize, thread, time::Instant};
 
 use gil::mpsc::channel;
 
+mod support;
+
 fn cpu_time_us() -> u64 {
     unsafe {
         let mut usage = std::mem::zeroed::<libc::rusage>();
@@ -145,6 +147,8 @@ fn run_bursty(
 }
 
 fn main() {
+    support::install_timeout();
+
     let size = NonZeroUsize::new(4096).unwrap();
 
     println!("=== MPSC default ===\n");

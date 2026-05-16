@@ -3,21 +3,17 @@ use std::{
     num::NonZeroUsize,
     sync::{Arc, Barrier},
     thread::spawn,
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 
-use criterion::{
-    BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
-};
+use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, measurement::WallTime};
 use gil::spmc::channel;
 
-fn make_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
-    let mut group = c.benchmark_group(name);
-    group.measurement_time(Duration::from_secs(3));
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
+mod support;
 
-    group
+fn make_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
+    let group = c.benchmark_group(name);
+    support::configure_group(group)
 }
 
 fn benchmark(c: &mut Criterion) {
@@ -42,15 +38,15 @@ fn benchmark(c: &mut Criterion) {
                         let (mut tx, rx) = channel::<u8>(size);
 
                         let barrier = Arc::new(Barrier::new(receiver_count + 1));
-                        let messages_per_receiver = iter / receiver_count;
-
                         let handles: Vec<_> = (0..receiver_count)
-                            .map(|_| {
+                            .map(|receiver_id| {
                                 let mut rx = rx.clone();
                                 let barrier = Arc::clone(&barrier);
+                                let messages =
+                                    support::work_items(iter, receiver_id, receiver_count);
                                 spawn(move || {
                                     barrier.wait();
-                                    for _ in 0..messages_per_receiver {
+                                    for _ in 0..messages {
                                         black_box(rx.recv());
                                     }
                                 })
@@ -60,7 +56,7 @@ fn benchmark(c: &mut Criterion) {
                         barrier.wait();
                         let start = SystemTime::now();
 
-                        for _ in 0..(messages_per_receiver * receiver_count) {
+                        for _ in 0..iter {
                             tx.send(black_box(0u8));
                         }
 
@@ -84,15 +80,15 @@ fn benchmark(c: &mut Criterion) {
                         let (mut tx, rx) = channel::<usize>(size);
 
                         let barrier = Arc::new(Barrier::new(receiver_count + 1));
-                        let messages_per_receiver = iter / receiver_count;
-
                         let handles: Vec<_> = (0..receiver_count)
-                            .map(|_| {
+                            .map(|receiver_id| {
                                 let mut rx = rx.clone();
                                 let barrier = Arc::clone(&barrier);
+                                let messages =
+                                    support::work_items(iter, receiver_id, receiver_count);
                                 spawn(move || {
                                     barrier.wait();
-                                    for _ in 0..messages_per_receiver {
+                                    for _ in 0..messages {
                                         black_box(rx.recv());
                                     }
                                 })
@@ -102,7 +98,7 @@ fn benchmark(c: &mut Criterion) {
                         barrier.wait();
                         let start = SystemTime::now();
 
-                        for _ in 0..(messages_per_receiver * receiver_count) {
+                        for _ in 0..iter {
                             tx.send(black_box(0usize));
                         }
 
@@ -166,4 +162,7 @@ fn benchmark(c: &mut Criterion) {
 
 criterion_group! {benches, benchmark}
 
-criterion_main! {benches}
+fn main() {
+    support::install_timeout();
+    benches();
+}

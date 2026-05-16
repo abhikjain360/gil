@@ -7,10 +7,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use criterion::{
-    BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
-};
+use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, measurement::WallTime};
 use gil::spsc::parking::channel;
+
+mod support;
 
 #[derive(Clone, Copy)]
 #[repr(align(8))]
@@ -25,12 +25,8 @@ impl Payload1024 {
 }
 
 fn make_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
-    let mut group = c.benchmark_group(name);
-    group.measurement_time(Duration::from_secs(3));
-    group.sample_size(50);
-    group.warm_up_time(Duration::from_secs(1));
-
-    group
+    let group = c.benchmark_group(name);
+    support::configure_group(group)
 }
 
 fn benchmark(c: &mut Criterion) {
@@ -50,7 +46,7 @@ fn benchmark(c: &mut Criterion) {
 
                 let iter = iter as usize;
 
-                spawn(move || {
+                let handle = spawn(move || {
                     for i in 0..iter {
                         let x = rx1.recv();
                         black_box(x);
@@ -66,7 +62,9 @@ fn benchmark(c: &mut Criterion) {
                     black_box(x);
                 }
 
-                start.elapsed().unwrap()
+                let duration = start.elapsed().unwrap();
+                handle.join().unwrap();
+                duration
             });
         });
 
@@ -77,7 +75,7 @@ fn benchmark(c: &mut Criterion) {
 
                 let iter = iter as usize;
 
-                spawn(move || {
+                let handle = spawn(move || {
                     for i in 0..iter {
                         let x = rx1.recv();
                         black_box(x);
@@ -93,7 +91,9 @@ fn benchmark(c: &mut Criterion) {
                     black_box(x);
                 }
 
-                start.elapsed().unwrap()
+                let duration = start.elapsed().unwrap();
+                handle.join().unwrap();
+                duration
             });
         });
 
@@ -104,7 +104,7 @@ fn benchmark(c: &mut Criterion) {
 
                 let iter = iter as usize;
 
-                spawn(move || {
+                let handle = spawn(move || {
                     for i in 0..iter {
                         let x = rx1.recv();
                         black_box(x);
@@ -120,7 +120,9 @@ fn benchmark(c: &mut Criterion) {
                     black_box(x);
                 }
 
-                start.elapsed().unwrap()
+                let duration = start.elapsed().unwrap();
+                handle.join().unwrap();
+                duration
             });
         });
     }
@@ -132,7 +134,7 @@ fn benchmark(c: &mut Criterion) {
         group.bench_function(format!("size_{size}/payload_1"), |b| {
             b.iter_custom(|iter| {
                 let (mut tx, mut rx) = channel::<u8>(size);
-                spawn(move || {
+                let handle = spawn(move || {
                     for _ in 0..iter {
                         black_box(rx.recv());
                     }
@@ -143,14 +145,16 @@ fn benchmark(c: &mut Criterion) {
                     tx.send(black_box(0u8));
                 }
 
-                start.elapsed().unwrap()
+                let duration = start.elapsed().unwrap();
+                handle.join().unwrap();
+                duration
             });
         });
 
         group.bench_function(format!("size_{size}/payload_8"), |b| {
             b.iter_custom(|iter| {
                 let (mut tx, mut rx) = channel::<usize>(size);
-                spawn(move || {
+                let handle = spawn(move || {
                     for _ in 0..iter {
                         black_box(rx.recv());
                     }
@@ -161,14 +165,16 @@ fn benchmark(c: &mut Criterion) {
                     tx.send(black_box(0usize));
                 }
 
-                start.elapsed().unwrap()
+                let duration = start.elapsed().unwrap();
+                handle.join().unwrap();
+                duration
             });
         });
 
         group.bench_function(format!("size_{size}/payload_1024"), |b| {
             b.iter_custom(|iter| {
                 let (mut tx, mut rx) = channel::<Payload1024>(size);
-                spawn(move || {
+                let handle = spawn(move || {
                     for _ in 0..iter {
                         black_box(rx.recv());
                     }
@@ -179,7 +185,9 @@ fn benchmark(c: &mut Criterion) {
                     tx.send(black_box(Payload1024::new(0)));
                 }
 
-                start.elapsed().unwrap()
+                let duration = start.elapsed().unwrap();
+                handle.join().unwrap();
+                duration
             });
         });
     }
@@ -199,7 +207,7 @@ fn benchmark(c: &mut Criterion) {
                 b.iter(|| {
                     let (mut tx, mut rx) = channel::<u8>(size);
 
-                    spawn(move || {
+                    let handle = spawn(move || {
                         for i in 0..ELEMENTS {
                             let x = black_box(rx.recv());
                             assert_eq!((i & 0xFF) as u8, x);
@@ -209,6 +217,8 @@ fn benchmark(c: &mut Criterion) {
                     for i in 0..ELEMENTS {
                         tx.send(black_box((i & 0xFF) as u8));
                     }
+
+                    handle.join().unwrap();
                 });
             });
 
@@ -216,7 +226,7 @@ fn benchmark(c: &mut Criterion) {
                 b.iter(|| {
                     let (mut tx, mut rx) = channel::<u8>(size);
 
-                    spawn(move || {
+                    let handle = spawn(move || {
                         let mut received = 0;
                         while received < ELEMENTS {
                             let mut guard = rx.read_guard();
@@ -253,6 +263,8 @@ fn benchmark(c: &mut Criterion) {
                         unsafe { tx.commit(len) };
                         sent += len;
                     }
+
+                    handle.join().unwrap();
                 });
             });
         }
@@ -271,7 +283,7 @@ fn benchmark(c: &mut Criterion) {
                 b.iter(|| {
                     let (mut tx, mut rx) = channel::<usize>(size);
 
-                    spawn(move || {
+                    let handle = spawn(move || {
                         for i in 0..ELEMENTS {
                             let x = black_box(rx.recv());
                             assert_eq!(i, x);
@@ -281,6 +293,8 @@ fn benchmark(c: &mut Criterion) {
                     for i in 0..ELEMENTS {
                         tx.send(black_box(i));
                     }
+
+                    handle.join().unwrap();
                 });
             });
 
@@ -288,7 +302,7 @@ fn benchmark(c: &mut Criterion) {
                 b.iter(|| {
                     let (mut tx, mut rx) = channel::<usize>(size);
 
-                    spawn(move || {
+                    let handle = spawn(move || {
                         let mut received = 0;
                         while received < ELEMENTS {
                             let mut guard = rx.read_guard();
@@ -325,6 +339,8 @@ fn benchmark(c: &mut Criterion) {
                         unsafe { tx.commit(len) };
                         sent += len;
                     }
+
+                    handle.join().unwrap();
                 });
             });
         }
@@ -344,7 +360,7 @@ fn benchmark(c: &mut Criterion) {
                 b.iter(|| {
                     let (mut tx, mut rx) = channel::<Payload1024>(size);
 
-                    spawn(move || {
+                    let handle = spawn(move || {
                         for i in 0..LARGE_ELEMENTS {
                             let x = black_box(rx.recv());
                             assert_eq!((i & 0xFF) as u8, x.data[0]);
@@ -354,6 +370,8 @@ fn benchmark(c: &mut Criterion) {
                     for i in 0..LARGE_ELEMENTS {
                         tx.send(black_box(Payload1024::new((i & 0xFF) as u8)));
                     }
+
+                    handle.join().unwrap();
                 });
             });
 
@@ -361,7 +379,7 @@ fn benchmark(c: &mut Criterion) {
                 b.iter(|| {
                     let (mut tx, mut rx) = channel::<Payload1024>(size);
 
-                    spawn(move || {
+                    let handle = spawn(move || {
                         let mut received = 0;
                         while received < LARGE_ELEMENTS {
                             let mut guard = rx.read_guard();
@@ -400,6 +418,8 @@ fn benchmark(c: &mut Criterion) {
                         unsafe { tx.commit(len) };
                         sent += len;
                     }
+
+                    handle.join().unwrap();
                 });
             });
         }
@@ -407,9 +427,7 @@ fn benchmark(c: &mut Criterion) {
 }
 
 fn large_queue_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("large_queue");
-    group.measurement_time(Duration::from_secs(5));
-    group.warm_up_time(Duration::from_secs(1));
+    let mut group = support::configure_group(c.benchmark_group("large_queue"));
 
     const ITERS: usize = 5_000_000;
 
@@ -475,4 +493,7 @@ fn large_queue_benchmark(c: &mut Criterion) {
 
 criterion_group! {benches, benchmark, large_queue_benchmark}
 
-criterion_main! {benches}
+fn main() {
+    support::install_timeout();
+    benches();
+}

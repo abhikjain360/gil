@@ -4,6 +4,8 @@ use std::{hint::black_box, num::NonZeroUsize, thread, time::Instant};
 
 use gil::spmc::sharded_parking::channel;
 
+mod support;
+
 fn cpu_time_us() -> u64 {
     unsafe {
         let mut usage = std::mem::zeroed::<libc::rusage>();
@@ -20,21 +22,21 @@ fn run_sustained(label: &str, size: NonZeroUsize, count: usize, receiver_count: 
     let cpu_start = cpu_time_us();
     let wall_start = Instant::now();
 
-    let items_per_receiver = count / receiver_count;
-
     let mut handles = Vec::new();
-    for _ in 0..receiver_count - 1 {
+    for receiver_id in 1..receiver_count {
         let mut rx = rx.clone().unwrap();
+        let items = support::work_items(count, receiver_id, receiver_count);
         handles.push(thread::spawn(move || {
-            for _ in 0..items_per_receiver {
+            for _ in 0..items {
                 black_box(rx.recv());
             }
         }));
     }
 
     let mut rx = rx;
+    let items = support::work_items(count, 0, receiver_count);
     handles.push(thread::spawn(move || {
-        for _ in 0..items_per_receiver {
+        for _ in 0..items {
             black_box(rx.recv());
         }
     }));
@@ -69,22 +71,21 @@ fn run_bursty(
     let cpu_start = cpu_time_us();
     let wall_start = Instant::now();
 
-    let items_per_receiver_per_burst = burst_size / receiver_count;
-    let total_per_receiver = bursts * items_per_receiver_per_burst;
-
     let mut handles = Vec::new();
-    for _ in 0..receiver_count - 1 {
+    for receiver_id in 1..receiver_count {
         let mut rx = rx.clone().unwrap();
+        let total = bursts * support::work_items(burst_size, receiver_id, receiver_count);
         handles.push(thread::spawn(move || {
-            for _ in 0..total_per_receiver {
+            for _ in 0..total {
                 black_box(rx.recv());
             }
         }));
     }
 
     let mut rx = rx;
+    let total = bursts * support::work_items(burst_size, 0, receiver_count);
     handles.push(thread::spawn(move || {
-        for _ in 0..total_per_receiver {
+        for _ in 0..total {
             black_box(rx.recv());
         }
     }));
@@ -136,6 +137,8 @@ fn run_idle_wait(label: &str, size: NonZeroUsize, wait_ms: u64) {
 }
 
 fn main() {
+    support::install_timeout();
+
     let size = NonZeroUsize::new(4096).unwrap();
 
     println!("=== SPMC sharded parking ===\n");

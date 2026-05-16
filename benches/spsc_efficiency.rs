@@ -8,6 +8,8 @@ use std::{hint::black_box, num::NonZeroUsize, thread, time::Instant};
 
 use gil::spsc::channel;
 
+mod support;
+
 fn cpu_time_us() -> u64 {
     unsafe {
         let mut usage = std::mem::zeroed::<libc::rusage>();
@@ -80,6 +82,8 @@ fn run_bursty(label: &str, size: NonZeroUsize, bursts: usize, burst_size: usize,
 }
 
 fn main() {
+    support::install_timeout();
+
     let size = NonZeroUsize::new(4096).unwrap();
 
     println!("=== SPSC spinning ===\n");

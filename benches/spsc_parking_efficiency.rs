@@ -8,6 +8,8 @@ use std::{hint::black_box, num::NonZeroUsize, thread, time::Instant};
 
 use gil::spsc::parking::channel;
 
+mod support;
+
 fn cpu_time_us() -> u64 {
     unsafe {
         let mut usage = std::mem::zeroed::<libc::rusage>();
@@ -104,6 +106,8 @@ fn run_idle_wait(label: &str, size: NonZeroUsize, wait_ms: u64) {
 }
 
 fn main() {
+    support::install_timeout();
+
     let size = NonZeroUsize::new(4096).unwrap();
 
     println!("=== SPSC parking ===\n");

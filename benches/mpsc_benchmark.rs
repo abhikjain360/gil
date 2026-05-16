@@ -6,10 +6,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use criterion::{
-    BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
-};
+use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, measurement::WallTime};
 use gil::mpsc::channel;
+
+mod support;
 
 /// A 1024-byte payload for benchmarking large object transfers
 #[derive(Clone, Copy)]
@@ -26,12 +26,8 @@ impl Payload1024 {
 }
 
 fn make_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
-    let mut group = c.benchmark_group(name);
-    group.measurement_time(Duration::from_secs(3));
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
-
-    group
+    let group = c.benchmark_group(name);
+    support::configure_group(group)
 }
 
 fn benchmark(c: &mut Criterion) {
@@ -56,15 +52,14 @@ fn benchmark(c: &mut Criterion) {
                         let (tx, mut rx) = channel::<u8>(size);
 
                         let barrier = Arc::new(Barrier::new(sender_count + 1));
-                        let messages_per_sender = iter / sender_count;
-
                         let handles: Vec<_> = (0..sender_count)
-                            .map(|_| {
+                            .map(|sender_id| {
                                 let mut tx = tx.clone();
                                 let barrier = Arc::clone(&barrier);
+                                let messages = support::work_items(iter, sender_id, sender_count);
                                 spawn(move || {
                                     barrier.wait();
-                                    for _ in 0..messages_per_sender {
+                                    for _ in 0..messages {
                                         tx.send(black_box(0u8));
                                     }
                                 })
@@ -74,7 +69,7 @@ fn benchmark(c: &mut Criterion) {
                         barrier.wait();
                         let start = SystemTime::now();
 
-                        for _ in 0..(messages_per_sender * sender_count) {
+                        for _ in 0..iter {
                             black_box(rx.recv());
                         }
 
@@ -98,15 +93,14 @@ fn benchmark(c: &mut Criterion) {
                         let (tx, mut rx) = channel::<usize>(size);
 
                         let barrier = Arc::new(Barrier::new(sender_count + 1));
-                        let messages_per_sender = iter / sender_count;
-
                         let handles: Vec<_> = (0..sender_count)
-                            .map(|_| {
+                            .map(|sender_id| {
                                 let mut tx = tx.clone();
                                 let barrier = Arc::clone(&barrier);
+                                let messages = support::work_items(iter, sender_id, sender_count);
                                 spawn(move || {
                                     barrier.wait();
-                                    for _ in 0..messages_per_sender {
+                                    for _ in 0..messages {
                                         tx.send(black_box(0usize));
                                     }
                                 })
@@ -116,7 +110,7 @@ fn benchmark(c: &mut Criterion) {
                         barrier.wait();
                         let start = SystemTime::now();
 
-                        for _ in 0..(messages_per_sender * sender_count) {
+                        for _ in 0..iter {
                             black_box(rx.recv());
                         }
 
@@ -140,15 +134,14 @@ fn benchmark(c: &mut Criterion) {
                         let (tx, mut rx) = channel::<Payload1024>(size);
 
                         let barrier = Arc::new(Barrier::new(sender_count + 1));
-                        let messages_per_sender = iter / sender_count;
-
                         let handles: Vec<_> = (0..sender_count)
-                            .map(|_| {
+                            .map(|sender_id| {
                                 let mut tx = tx.clone();
                                 let barrier = Arc::clone(&barrier);
+                                let messages = support::work_items(iter, sender_id, sender_count);
                                 spawn(move || {
                                     barrier.wait();
-                                    for _ in 0..messages_per_sender {
+                                    for _ in 0..messages {
                                         tx.send(black_box(Payload1024::new(0)));
                                     }
                                 })
@@ -158,7 +151,7 @@ fn benchmark(c: &mut Criterion) {
                         barrier.wait();
                         let start = SystemTime::now();
 
-                        for _ in 0..(messages_per_sender * sender_count) {
+                        for _ in 0..iter {
                             black_box(rx.recv());
                         }
 
@@ -392,4 +385,7 @@ fn large_queue_benchmark(c: &mut Criterion) {
 
 criterion_group! {benches, benchmark, large_queue_benchmark}
 
-criterion_main! {benches}
+fn main() {
+    support::install_timeout();
+    benches();
+}

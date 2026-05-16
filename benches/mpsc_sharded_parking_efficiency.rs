@@ -4,6 +4,8 @@ use std::{hint::black_box, num::NonZeroUsize, thread, time::Instant};
 
 use gil::mpsc::sharded_parking::channel;
 
+mod support;
+
 fn cpu_time_us() -> u64 {
     unsafe {
         let mut usage = std::mem::zeroed::<libc::rusage>();
@@ -20,8 +22,6 @@ fn run_sustained(label: &str, size: NonZeroUsize, count: usize, sender_count: us
     let cpu_start = cpu_time_us();
     let wall_start = Instant::now();
 
-    let per_sender = count / sender_count;
-
     let recv_handle = thread::spawn(move || {
         for _ in 0..count {
             black_box(rx.recv());
@@ -29,18 +29,20 @@ fn run_sustained(label: &str, size: NonZeroUsize, count: usize, sender_count: us
     });
 
     let mut sender_handles = Vec::new();
-    for _ in 0..sender_count - 1 {
+    for sender_id in 0..sender_count - 1 {
         let mut tx_clone = tx.clone().unwrap();
+        let items = support::work_items(count, sender_id, sender_count);
         sender_handles.push(thread::spawn(move || {
-            for i in 0..per_sender {
+            for i in 0..items {
                 tx_clone.send(black_box(i));
             }
         }));
     }
 
     let mut tx = tx;
+    let items = support::work_items(count, sender_count - 1, sender_count);
     sender_handles.push(thread::spawn(move || {
-        for i in 0..per_sender {
+        for i in 0..items {
             tx.send(black_box(i));
         }
     }));
@@ -67,11 +69,9 @@ fn run_bursty(
     gap_ms: u64,
     sender_count: usize,
 ) {
-    let (tx, mut rx) = channel::<usize>(NonZeroUsize::new(sender_count).unwrap(), size);
+    let (mut tx, mut rx) = channel::<usize>(NonZeroUsize::new(sender_count).unwrap(), size);
 
     let total = bursts * burst_size;
-    let per_sender = burst_size / sender_count;
-
     let cpu_start = cpu_time_us();
     let wall_start = Instant::now();
 
@@ -81,33 +81,35 @@ fn run_bursty(
         }
     });
 
+    let mut sender_handles = Vec::new();
+    for sender_id in 1..sender_count {
+        let mut tx_clone = tx.clone().unwrap();
+        let items = support::work_items(burst_size, sender_id, sender_count);
+        sender_handles.push(thread::spawn(move || {
+            for b in 0..bursts {
+                for i in 0..items {
+                    tx_clone.send(black_box(b * burst_size + i));
+                }
+                if b + 1 < bursts {
+                    thread::sleep(std::time::Duration::from_millis(gap_ms));
+                }
+            }
+        }));
+    }
+
+    let items = support::work_items(burst_size, 0, sender_count);
     for b in 0..bursts {
-        let mut sender_handles = Vec::new();
-        for _ in 0..sender_count - 1 {
-            let mut tx_clone = tx.clone().unwrap();
-            sender_handles.push(thread::spawn(move || {
-                for i in 0..per_sender {
-                    tx_clone.send(black_box(b * burst_size + i));
-                }
-            }));
-        }
-
-        {
-            let mut tx_clone = tx.clone().unwrap();
-            sender_handles.push(thread::spawn(move || {
-                for i in 0..per_sender {
-                    tx_clone.send(black_box(b * burst_size + i));
-                }
-            }));
-        }
-
-        for h in sender_handles {
-            h.join().unwrap();
+        for i in 0..items {
+            tx.send(black_box(b * burst_size + i));
         }
 
         if b + 1 < bursts {
             thread::sleep(std::time::Duration::from_millis(gap_ms));
         }
+    }
+
+    for h in sender_handles {
+        h.join().unwrap();
     }
 
     drop(tx);
@@ -147,6 +149,8 @@ fn run_idle_wait(label: &str, size: NonZeroUsize, wait_ms: u64) {
 }
 
 fn main() {
+    support::install_timeout();
+
     let size = NonZeroUsize::new(4096).unwrap();
     let sender_counts = [1, 2, 4];
 

@@ -3,21 +3,16 @@ use std::{
     num::NonZeroUsize,
     sync::{Arc, Barrier},
     thread::spawn,
-    time::Duration,
 };
 
-use criterion::{
-    BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
-};
+use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, measurement::WallTime};
 use gil::mpmc::channel;
 
-fn make_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
-    let mut group = c.benchmark_group(name);
-    group.measurement_time(Duration::from_secs(3));
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
+mod support;
 
-    group
+fn make_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
+    let group = c.benchmark_group(name);
+    support::configure_group(group)
 }
 
 fn benchmark(c: &mut Criterion) {
@@ -84,4 +79,8 @@ fn benchmark(c: &mut Criterion) {
 }
 
 criterion_group!(benches, benchmark);
-criterion_main!(benches);
+
+fn main() {
+    support::install_timeout();
+    benches();
+}
