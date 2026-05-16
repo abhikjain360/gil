@@ -74,6 +74,14 @@ impl<T> ShardsPtr<T> {
         unsafe { Shards::at(self.ptr, shard).as_ref() }.clone()
     }
 
+    pub(crate) fn try_claim_queue_ptr(
+        &self,
+        shard: usize,
+        ref_count: usize,
+    ) -> Option<spsc::QueuePtr<T>> {
+        unsafe { Shards::at(self.ptr, shard).as_ref() }.try_clone_from_count(ref_count)
+    }
+
     fn rc(&self) -> &AtomicUsize {
         unsafe { _field!(Shards<T>, self.ptr, rc, AtomicUsize).as_ref() }
     }

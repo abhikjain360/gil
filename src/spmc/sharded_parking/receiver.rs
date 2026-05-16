@@ -1,8 +1,7 @@
 use core::{num::NonZeroUsize, ptr::NonNull};
 
 use crate::{
-    Box,
-    atomic::{AtomicU32, AtomicUsize, Ordering},
+    atomic::{AtomicU32, Ordering},
     read_guard::BatchReader,
     spsc::{self, parking_shards::ParkingShardsPtr},
 };
@@ -17,52 +16,58 @@ pub struct Receiver<T> {
     local_tail: usize,
     futex: NonNull<AtomicU32>,
     shards: ParkingShardsPtr<T>,
-    num_receivers: NonNull<AtomicUsize>,
     max_shards: usize,
+    shard: usize,
 }
 
 impl<T> Receiver<T> {
     pub(crate) fn new(shards: ParkingShardsPtr<T>, max_shards: NonZeroUsize) -> Self {
-        let num_receivers_ptr = Box::into_raw(Box::new(AtomicUsize::new(0)));
-        unsafe {
-            let num_receivers = NonNull::new_unchecked(num_receivers_ptr);
-            Self::init(shards, max_shards.get(), num_receivers).unwrap_unchecked()
-        }
+        Self::init(shards, max_shards.get(), 0, 2).unwrap()
     }
 
     /// Attempts to clone the receiver.
     ///
     /// Returns `Some(Receiver)` if there is an available shard, or `None` if
     /// all shards are already occupied.
+    ///
+    /// This scans the shard table and may touch up to `max_shards` atomics. Prefer
+    /// creating long-lived receivers instead of cloning and dropping in a hot path.
     #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Option<Self> {
-        unsafe { Self::init(self.shards.clone(), self.max_shards, self.num_receivers) }
+        Self::init(
+            self.shards.clone(),
+            self.max_shards,
+            self.shard.wrapping_add(1),
+            self.ptr.ref_count() - 1,
+        )
     }
 
-    unsafe fn init(
+    fn init(
         shards: ParkingShardsPtr<T>,
         max_shards: usize,
-        num_receivers: NonNull<AtomicUsize>,
+        start_shard: usize,
+        free_ref_count: usize,
     ) -> Option<Self> {
-        let num_receivers_ref = unsafe { num_receivers.as_ref() };
-        let next_shard = num_receivers_ref.fetch_add(1, Ordering::AcqRel);
-        if next_shard >= max_shards {
-            num_receivers_ref.fetch_sub(1, Ordering::AcqRel);
-            return None;
+        for offset in 0..max_shards {
+            let shard = start_shard.wrapping_add(offset) % max_shards;
+            if let Some(shard_ptr) = shards.try_claim_queue_ptr(shard, free_ref_count) {
+                let local_head = shard_ptr.head().load(Ordering::Acquire);
+                let local_tail = shard_ptr.tail().load(Ordering::Acquire);
+                let futex = NonNull::from(shards.futex());
+
+                return Some(Self {
+                    ptr: shard_ptr,
+                    local_head,
+                    local_tail,
+                    futex,
+                    shards,
+                    max_shards,
+                    shard,
+                });
+            }
         }
 
-        let shard_ptr = shards.clone_queue_ptr(next_shard);
-        let futex = NonNull::from(shards.futex());
-
-        Some(Self {
-            ptr: shard_ptr,
-            local_head: 0,
-            local_tail: 0,
-            futex,
-            shards,
-            num_receivers,
-            max_shards,
-        })
+        None
     }
 
     /// Receives a value, parking if the shard is empty.
@@ -127,15 +132,6 @@ impl<T> Receiver<T> {
     #[inline(always)]
     fn load_tail(&mut self) {
         self.local_tail = self.ptr.tail().load(Ordering::Acquire);
-    }
-}
-
-impl<T> Drop for Receiver<T> {
-    fn drop(&mut self) {
-        let num_receivers_ref = unsafe { self.num_receivers.as_ref() };
-        if num_receivers_ref.fetch_sub(1, Ordering::AcqRel) == 1 {
-            _ = unsafe { Box::from_raw(self.num_receivers.as_ptr()) };
-        }
     }
 }
 

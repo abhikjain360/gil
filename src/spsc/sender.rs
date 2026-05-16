@@ -34,6 +34,21 @@ impl<T> Sender<T> {
         }
     }
 
+    pub(crate) fn from_current(queue_ptr: QueuePtr<T>) -> Self {
+        let local_head = queue_ptr.head().load(Ordering::Acquire);
+        let local_tail = queue_ptr.tail().load(Ordering::Acquire);
+
+        Self {
+            ptr: queue_ptr,
+            local_head,
+            local_tail,
+        }
+    }
+
+    pub(crate) fn ref_count(&self) -> usize {
+        self.ptr.ref_count()
+    }
+
     /// Attempts to send a value into the queue without blocking.
     ///
     /// Returns `Ok(())` if the value was successfully enqueued, or `Err(value)` if the

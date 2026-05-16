@@ -1,4 +1,4 @@
-use core::ptr::{self, NonNull};
+use core::ptr::NonNull;
 
 use crate::{
     Backoff, Box,
@@ -9,6 +9,13 @@ use crate::{
 };
 
 type Lock = Padded<AtomicBool>;
+
+struct Shared<T> {
+    receivers: Box<[spsc::Receiver<T>]>,
+    locks: Box<[Lock]>,
+    alive_receivers: AtomicUsize,
+    max_shards: usize,
+}
 
 /// The receiving half of a sharded MPMC channel.
 ///
@@ -32,11 +39,7 @@ type Lock = Padded<AtomicBool>;
 /// assert_eq!(rx.recv(), 2);
 /// ```
 pub struct Receiver<T> {
-    receivers: Box<[spsc::Receiver<T>]>,
-    locks: NonNull<Lock>,
-    alive_receivers: NonNull<AtomicUsize>,
-    shards: ShardsPtr<T>,
-    max_shards: usize,
+    shared: NonNull<Shared<T>>,
     next_shard: usize,
 }
 
@@ -52,17 +55,15 @@ impl<T> Receiver<T> {
             locks[i].write(Padded::new(AtomicBool::new(false)));
         }
 
-        let locks = unsafe { NonNull::new_unchecked(Box::into_raw(locks.assume_init())) }.cast();
-
-        let alive_receivers_ptr = Box::into_raw(Box::new(AtomicUsize::new(1)));
-        let alive_receivers = unsafe { NonNull::new_unchecked(alive_receivers_ptr) };
+        let shared = Box::new(Shared {
+            receivers: unsafe { receivers.assume_init() },
+            locks: unsafe { locks.assume_init() },
+            alive_receivers: AtomicUsize::new(1),
+            max_shards,
+        });
 
         Self {
-            receivers: unsafe { receivers.assume_init() },
-            locks,
-            alive_receivers,
-            shards,
-            max_shards,
+            shared: unsafe { NonNull::new_unchecked(Box::into_raw(shared)) },
             next_shard: 0,
         }
     }
@@ -86,23 +87,26 @@ impl<T> Receiver<T> {
     /// let rx2 = rx.try_clone().expect("slot available");
     /// ```
     pub fn try_clone(&self) -> Option<Self> {
-        let num_receivers_ref = unsafe { self.alive_receivers.as_ref() };
-        if num_receivers_ref.fetch_add(1, Ordering::AcqRel) == self.max_shards {
-            num_receivers_ref.fetch_sub(1, Ordering::AcqRel);
-            return None;
-        }
+        let shared = self.shared();
+        let mut live = shared.alive_receivers.load(Ordering::Acquire);
+        loop {
+            if live >= shared.max_shards {
+                return None;
+            }
 
-        let mut receivers = Box::new_uninit_slice(self.max_shards);
-        for i in 0..self.max_shards {
-            receivers[i].write(unsafe { self.receivers[i].clone_via_ptr() });
+            match shared.alive_receivers.compare_exchange(
+                live,
+                live + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => live = actual,
+            }
         }
 
         Some(Self {
-            receivers: unsafe { receivers.assume_init() },
-            alive_receivers: self.alive_receivers,
-            shards: self.shards.clone(),
-            locks: self.locks,
-            max_shards: self.max_shards,
+            shared: self.shared,
             next_shard: 0,
         })
     }
@@ -187,9 +191,10 @@ impl<T> Receiver<T> {
         loop {
             let idx = self.next_shard;
 
-            if !self.receivers[idx].is_empty() && self.try_lock(idx) {
-                self.receivers[idx].refresh_head();
-                let ret = self.receivers[idx].try_recv();
+            if self.try_lock(idx) {
+                let receiver = unsafe { self.receiver_mut(idx) };
+                receiver.refresh_head();
+                let ret = receiver.try_recv();
                 unsafe { self.unlock(idx) };
 
                 if let Some(v) = ret {
@@ -198,7 +203,7 @@ impl<T> Receiver<T> {
             }
 
             self.next_shard += 1;
-            if self.next_shard == self.max_shards {
+            if self.next_shard == self.shared().max_shards {
                 self.next_shard = 0;
             }
 
@@ -242,8 +247,29 @@ impl<T> Receiver<T> {
     }
 
     #[inline(always)]
+    fn shared(&self) -> &Shared<T> {
+        unsafe { self.shared.as_ref() }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must hold this shard's lock.
+    #[inline(always)]
+    unsafe fn receiver_mut(&mut self, shard: usize) -> &mut spsc::Receiver<T> {
+        unsafe {
+            &mut *(self
+                .shared()
+                .receivers
+                .as_ptr()
+                .add(shard)
+                .cast::<spsc::Receiver<T>>()
+                .cast_mut())
+        }
+    }
+
+    #[inline(always)]
     fn shard_lock(&self, shard: usize) -> &AtomicBool {
-        unsafe { self.locks.add(shard).cast::<AtomicBool>().as_ref() }
+        &self.shared().locks[shard].value
     }
 
     #[inline(always)]
@@ -315,10 +341,10 @@ unsafe impl<T> BatchReader for Receiver<T> {
         loop {
             let idx = self.next_shard;
 
-            if !self.receivers[idx].is_empty() && self.try_lock(idx) {
-                let receiver_ptr = &mut self.receivers[idx] as *mut spsc::Receiver<T>;
-                unsafe { (*receiver_ptr).refresh_head() };
-                let ret = unsafe { (*receiver_ptr).read_buffer() };
+            if self.try_lock(idx) {
+                let receiver = unsafe { self.receiver_mut(idx) };
+                receiver.refresh_head();
+                let ret = receiver.read_buffer();
 
                 if !ret.is_empty() {
                     return unsafe { core::mem::transmute::<&[T], &[T]>(ret) };
@@ -328,7 +354,7 @@ unsafe impl<T> BatchReader for Receiver<T> {
             }
 
             self.next_shard += 1;
-            if self.next_shard == self.max_shards {
+            if self.next_shard == self.shared().max_shards {
                 self.next_shard = 0;
             }
 
@@ -339,7 +365,8 @@ unsafe impl<T> BatchReader for Receiver<T> {
     }
 
     unsafe fn advance(&mut self, n: usize) {
-        unsafe { self.receivers[self.next_shard].advance(n) };
+        let receiver = unsafe { self.receiver_mut(self.next_shard) };
+        unsafe { receiver.advance(n) };
     }
 
     /// Releases the shard spinlock acquired by
@@ -357,10 +384,8 @@ unsafe impl<T> BatchReader for Receiver<T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         unsafe {
-            if self.alive_receivers.as_ref().fetch_sub(1, Ordering::AcqRel) == 1 {
-                let slice_ptr = ptr::slice_from_raw_parts_mut(self.locks.as_ptr(), self.max_shards);
-                _ = Box::from_raw(slice_ptr);
-                _ = Box::from_raw(self.alive_receivers.as_ptr());
+            if self.shared().alive_receivers.fetch_sub(1, Ordering::AcqRel) == 1 {
+                _ = Box::from_raw(self.shared.as_ptr());
             }
         }
     }

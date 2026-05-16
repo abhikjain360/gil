@@ -98,6 +98,26 @@ mod test {
     }
 
     #[test]
+    fn receiver_clone_reuses_dropped_shard() {
+        let (mut tx, mut rx0) =
+            channel::<usize>(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(4).unwrap());
+        let mut rx1 = rx0.clone().unwrap();
+
+        tx.send(0);
+        tx.send(1);
+        assert_eq!(rx0.recv(), 0);
+        assert_eq!(rx1.recv(), 1);
+
+        drop(rx0);
+
+        let mut rx2 = rx1.clone().unwrap();
+        assert!(rx1.clone().is_none());
+
+        tx.send(2);
+        assert_eq!(rx2.try_recv(), Some(2));
+    }
+
+    #[test]
     fn test_try_ops() {
         let (mut tx, mut rx) =
             channel::<usize>(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(4).unwrap());

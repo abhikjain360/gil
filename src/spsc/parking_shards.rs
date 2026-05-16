@@ -84,6 +84,14 @@ impl<T> ParkingShardsPtr<T> {
         unsafe { ParkingShards::at(self.ptr, shard).as_ref() }.clone()
     }
 
+    pub(crate) fn try_claim_queue_ptr(
+        &self,
+        shard: usize,
+        ref_count: usize,
+    ) -> Option<spsc::QueuePtr<T>> {
+        unsafe { ParkingShards::at(self.ptr, shard).as_ref() }.try_clone_from_count(ref_count)
+    }
+
     pub(crate) fn futex(&self) -> &AtomicU32 {
         unsafe { _field!(ParkingShards<T>, self.ptr, futex.value, AtomicU32).as_ref() }
     }

@@ -1,8 +1,7 @@
 use core::{mem::MaybeUninit, num::NonZeroUsize, ptr::NonNull};
 
 use crate::{
-    Box,
-    atomic::{AtomicU32, AtomicUsize, Ordering},
+    atomic::{AtomicU32, Ordering},
     spsc::{self, parking_shards::ParkingShardsPtr},
 };
 
@@ -19,52 +18,58 @@ pub struct Sender<T> {
     local_tail: usize,
     futex: NonNull<AtomicU32>,
     shards: ParkingShardsPtr<T>,
-    num_senders: NonNull<AtomicUsize>,
     max_shards: usize,
+    shard: usize,
 }
 
 impl<T> Sender<T> {
     pub(crate) fn new(shards: ParkingShardsPtr<T>, max_shards: NonZeroUsize) -> Self {
-        let num_senders_ptr = Box::into_raw(Box::new(AtomicUsize::new(0)));
-        unsafe {
-            let num_senders = NonNull::new_unchecked(num_senders_ptr);
-            Self::init(shards, max_shards.get(), num_senders).unwrap_unchecked()
-        }
+        Self::init(shards, max_shards.get(), 0, 2).unwrap()
     }
 
     /// Attempts to clone the sender.
     ///
     /// Returns `Some(Sender)` if there is an available shard to bind to, or `None` if
     /// all shards are already occupied.
+    ///
+    /// This scans the shard table and may touch up to `max_shards` atomics. Prefer
+    /// creating long-lived senders instead of cloning and dropping in a hot path.
     #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Option<Self> {
-        unsafe { Self::init(self.shards.clone(), self.max_shards, self.num_senders) }
+        Self::init(
+            self.shards.clone(),
+            self.max_shards,
+            self.shard.wrapping_add(1),
+            self.ptr.ref_count() - 1,
+        )
     }
 
-    pub(crate) unsafe fn init(
+    pub(crate) fn init(
         shards: ParkingShardsPtr<T>,
         max_shards: usize,
-        num_senders: NonNull<AtomicUsize>,
+        start_shard: usize,
+        free_ref_count: usize,
     ) -> Option<Self> {
-        let num_senders_ref = unsafe { num_senders.as_ref() };
-        let next_shard = num_senders_ref.fetch_add(1, Ordering::AcqRel);
-        if next_shard >= max_shards {
-            num_senders_ref.fetch_sub(1, Ordering::AcqRel);
-            return None;
+        for offset in 0..max_shards {
+            let shard = start_shard.wrapping_add(offset) % max_shards;
+            if let Some(shard_ptr) = shards.try_claim_queue_ptr(shard, free_ref_count) {
+                let local_head = shard_ptr.head().load(Ordering::Acquire);
+                let local_tail = shard_ptr.tail().load(Ordering::Acquire);
+                let futex = NonNull::from(shards.futex());
+
+                return Some(Self {
+                    ptr: shard_ptr,
+                    local_head,
+                    local_tail,
+                    futex,
+                    shards,
+                    max_shards,
+                    shard,
+                });
+            }
         }
 
-        let shard_ptr = shards.clone_queue_ptr(next_shard);
-        let futex = NonNull::from(shards.futex());
-
-        Some(Self {
-            ptr: shard_ptr,
-            local_head: 0,
-            local_tail: 0,
-            futex,
-            shards,
-            num_senders,
-            max_shards,
-        })
+        None
     }
 
     /// Sends a value into the channel, parking if the shard is full.
@@ -174,15 +179,6 @@ impl<T> Sender<T> {
     #[inline(always)]
     fn load_head(&mut self) {
         self.local_head = self.ptr.head().load(Ordering::Acquire);
-    }
-}
-
-impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {
-        let num_senders_ref = unsafe { self.num_senders.as_ref() };
-        if num_senders_ref.fetch_sub(1, Ordering::AcqRel) == 1 {
-            _ = unsafe { Box::from_raw(self.num_senders.as_ptr()) };
-        }
     }
 }
 

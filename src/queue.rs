@@ -33,8 +33,7 @@ pub struct QueuePtr<H, T, I, G: DropInitItems<H, T, I>> {
 
 impl<H, T, I, G: DropInitItems<H, T, I>> Clone for QueuePtr<H, T, I, G> {
     fn clone(&self) -> Self {
-        let rc = unsafe { _field!(Queue<H, T>, self.ptr, rc, AtomicUsize).as_ref() };
-        rc.fetch_add(1, Ordering::AcqRel);
+        self.rc().fetch_add(1, Ordering::AcqRel);
         Self {
             ptr: self.ptr,
             buffer: self.buffer,
@@ -98,6 +97,30 @@ pub(crate) trait Initializer {
 }
 
 impl<H, T, I, G: DropInitItems<H, T, I>> QueuePtr<H, T, I, G> {
+    #[inline(always)]
+    fn rc(&self) -> &AtomicUsize {
+        unsafe { _field!(Queue<H, T>, self.ptr, rc, AtomicUsize).as_ref() }
+    }
+
+    pub(crate) fn try_clone_from_count(&self, current: usize) -> Option<Self> {
+        self.rc()
+            .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+
+        Some(Self {
+            ptr: self.ptr,
+            buffer: self.buffer,
+            size: self.size,
+            mask: self.mask,
+            capacity: self.capacity,
+            _marker: PhantomData,
+        })
+    }
+
+    pub(crate) fn ref_count(&self) -> usize {
+        self.rc().load(Ordering::Acquire)
+    }
+
     fn layout(capacity: usize) -> (alloc::Layout, usize) {
         let header_layout =
             alloc::Layout::from_size_align(size_of::<Queue<H, T>>(), align_of::<Queue<H, T>>())
@@ -136,8 +159,7 @@ impl<H, T, I, G: DropInitItems<H, T, I>> QueuePtr<H, T, I, G> {
 
 impl<H, T, I, G: DropInitItems<H, T, I>> Drop for QueuePtr<H, T, I, G> {
     fn drop(&mut self) {
-        let rc = unsafe { _field!(Queue<H, T>, self.ptr, rc, AtomicUsize).as_ref() };
-        if rc.fetch_sub(1, Ordering::AcqRel) == 1 {
+        if self.rc().fetch_sub(1, Ordering::AcqRel) == 1 {
             let (layout, _) = Self::layout(self.capacity);
 
             unsafe {

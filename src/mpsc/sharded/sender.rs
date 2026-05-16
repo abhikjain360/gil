@@ -1,10 +1,6 @@
-use core::{mem::MaybeUninit, num::NonZeroUsize, ptr::NonNull};
+use core::{mem::MaybeUninit, num::NonZeroUsize};
 
-use crate::{
-    Box,
-    spsc::{self, shards::ShardsPtr},
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use crate::spsc::{self, shards::ShardsPtr};
 
 /// The sending half of a sharded MPSC channel.
 ///
@@ -33,23 +29,22 @@ use crate::{
 pub struct Sender<T> {
     inner: spsc::Sender<T>,
     shards: ShardsPtr<T>,
-    num_senders: NonNull<AtomicUsize>,
     max_shards: usize,
+    shard: usize,
 }
 
 impl<T> Sender<T> {
     pub(crate) fn new(shards: ShardsPtr<T>, max_shards: NonZeroUsize) -> Self {
-        let num_senders_ptr = Box::into_raw(Box::new(AtomicUsize::new(0)));
-        unsafe {
-            let num_senders = NonNull::new_unchecked(num_senders_ptr);
-            Self::init(shards, max_shards.get(), num_senders).unwrap_unchecked()
-        }
+        Self::init(shards, max_shards.get(), 0, 2).unwrap()
     }
 
     /// Attempts to clone the sender.
     ///
     /// Returns `Some(Sender)` if there is an available shard to bind to, or `None` if
     /// all shards are already occupied.
+    ///
+    /// This scans the shard table and may touch up to `max_shards` atomics. Prefer
+    /// creating long-lived senders instead of cloning and dropping in a hot path.
     ///
     /// # Examples
     ///
@@ -69,30 +64,35 @@ impl<T> Sender<T> {
     /// ```
     #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Option<Self> {
-        unsafe { Self::init(self.shards.clone(), self.max_shards, self.num_senders) }
+        Self::init(
+            self.shards.clone(),
+            self.max_shards,
+            self.shard.wrapping_add(1),
+            self.inner.ref_count() - 1,
+        )
     }
 
-    pub(crate) unsafe fn init(
+    pub(crate) fn init(
         shards: ShardsPtr<T>,
         max_shards: usize,
-        num_senders: NonNull<AtomicUsize>,
+        start_shard: usize,
+        free_ref_count: usize,
     ) -> Option<Self> {
-        let num_senders_ref = unsafe { num_senders.as_ref() };
-        let next_shard = num_senders_ref.fetch_add(1, Ordering::AcqRel);
-        if next_shard >= max_shards {
-            num_senders_ref.fetch_sub(1, Ordering::AcqRel);
-            return None;
+        for offset in 0..max_shards {
+            let shard = start_shard.wrapping_add(offset) % max_shards;
+            if let Some(shard_ptr) = shards.try_claim_queue_ptr(shard, free_ref_count) {
+                let inner = spsc::Sender::from_current(shard_ptr);
+
+                return Some(Self {
+                    inner,
+                    shards,
+                    max_shards,
+                    shard,
+                });
+            }
         }
 
-        let shard_ptr = shards.clone_queue_ptr(next_shard);
-        let inner = spsc::Sender::new(shard_ptr);
-
-        Some(Self {
-            inner,
-            shards,
-            num_senders,
-            max_shards,
-        })
+        None
     }
 
     /// Sends a value into the channel.
@@ -192,16 +192,6 @@ impl<T> Sender<T> {
     /// ```
     pub unsafe fn commit(&mut self, len: usize) {
         unsafe { self.inner.commit(len) }
-    }
-}
-
-impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {
-        let num_senders_ref = unsafe { self.num_senders.as_ref() };
-        if num_senders_ref.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // creating a box so that heap allocation is also freed
-            _ = unsafe { Box::from_raw(self.num_senders.as_ptr()) };
-        }
     }
 }
 

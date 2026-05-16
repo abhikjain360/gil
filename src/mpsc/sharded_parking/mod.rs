@@ -60,10 +60,10 @@ pub fn channel<T>(
 
     let shards = ParkingShardsPtr::new(max_shards, capacity_per_shard);
 
-    (
-        Sender::new(shards.clone(), max_shards),
-        Receiver::new(shards, max_shards.get()),
-    )
+    let receiver = Receiver::new(shards.clone(), max_shards.get());
+    let sender = Sender::new(shards, max_shards);
+
+    (sender, receiver)
 }
 
 #[cfg(all(test, not(feature = "loom")))]
@@ -108,6 +108,24 @@ mod test {
 
             assert_eq!(sum, (ITER * (ITER - 1)) / 2 * THREADS);
         });
+    }
+
+    #[test]
+    fn sender_clone_reuses_dropped_shard() {
+        let (tx0, mut rx) =
+            channel::<usize>(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(4).unwrap());
+        let mut tx1 = tx0.clone().unwrap();
+
+        tx1.send(1);
+        assert_eq!(rx.recv(), 1);
+
+        drop(tx0);
+
+        let mut tx2 = tx1.clone().unwrap();
+        assert!(tx1.clone().is_none());
+
+        tx2.try_send(2).unwrap();
+        assert_eq!(rx.try_recv(), Some(2));
     }
 
     #[test]

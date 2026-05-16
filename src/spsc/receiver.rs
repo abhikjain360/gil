@@ -38,15 +38,6 @@ impl<T> Receiver<T> {
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.local_head == self.local_tail && {
-            // relaxed load is enough as we are only checking for emptiness hint
-            // to avoid expensive locking in sharded implementation
-            let tail = self.ptr.tail().load(Ordering::Relaxed);
-            self.local_head == tail
-        }
-    }
-
     /// Attempts to receive a value from the queue without blocking.
     ///
     /// Returns `Some(value)` if a value is available, or `None` if the queue is empty.
@@ -242,17 +233,6 @@ impl<T> Receiver<T> {
         self.local_head = self.ptr.head().load(Ordering::Acquire);
         if self.local_tail < self.local_head {
             self.local_tail = self.ptr.tail().load(Ordering::Acquire);
-        }
-    }
-
-    /// # Safety
-    /// Caller needs to ensure that only one receiver ever access the the `self.ptr` at any time.
-    #[inline(always)]
-    pub(crate) unsafe fn clone_via_ptr(&self) -> Self {
-        Self {
-            ptr: self.ptr.clone(),
-            local_tail: self.local_tail,
-            local_head: self.local_head,
         }
     }
 }
