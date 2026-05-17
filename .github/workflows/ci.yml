@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request_review:
+    types:
+      - submitted
+  workflow_dispatch:
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.review.user.login == github.repository_owner)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.review.user.login == github.repository_owner)
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep this explicit: --all-features would enable the optional loom dependency.
+        include:
+          - name: default
+            args: ""
+          - name: no-default-features
+            args: --no-default-features
+          - name: async-std
+            args: --features async-std
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: clippy-${{ matrix.name }}
+          workspaces: . -> target
+
+      - name: Run clippy
+        run: cargo clippy --workspace ${{ matrix.args }} --lib --tests -- -D warnings
+
+  no-std:
+    name: No std (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.review.user.login == github.repository_owner)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            target: thumbv7em-none-eabihf
+            features: ""
+          - name: async
+            target: thumbv7em-none-eabihf
+            features: --features async
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: no-std-${{ matrix.name }}-${{ matrix.target }}
+          workspaces: . -> target
+
+      - name: Check no-std build
+        run: cargo check --workspace --no-default-features ${{ matrix.features }} --target ${{ matrix.target }} --lib
+
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.review.user.login == github.repository_owner)
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep this explicit: --all-features would enable the optional loom dependency.
+        include:
+          - name: default
+            args: ""
+            doc_tests: true
+          - name: no-default-features
+            args: --no-default-features
+            doc_tests: false
+          - name: async-std
+            args: --features async-std
+            doc_tests: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: test-${{ matrix.name }}
+          workspaces: . -> target
+
+      - name: Run unit tests
+        run: cargo test --workspace ${{ matrix.args }} --lib --tests
+
+      - name: Run doc tests
+        if: matrix.doc_tests
+        run: cargo test --workspace ${{ matrix.args }} --doc
