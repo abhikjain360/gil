@@ -8,6 +8,7 @@ use futures::task::AtomicWaker;
 use crate::{
     atomic::{AtomicUsize, Ordering},
     padded::Padded,
+    queue::{Ownership, RefCounted, ShardOwnership},
 };
 
 #[derive(Default)]
@@ -57,27 +58,38 @@ impl<T> crate::DropInitItems<Head, Tail, T> for GetInit {
     }
 }
 
-pub(crate) type QueuePtr<T> = crate::QueuePtr<Head, Tail, T, GetInit>;
-type Queue = crate::Queue<Head, Tail>;
+pub(crate) type QueuePtr<T, O = RefCounted> = crate::QueuePtr<Head, Tail, T, GetInit, O>;
+pub(crate) type ShardQueuePtr<T> = QueuePtr<T, ShardOwnership>;
+type Queue<O = RefCounted> = crate::Queue<Head, Tail, O>;
 
-impl<T> QueuePtr<T> {
+impl<T, O: Ownership> QueuePtr<T, O> {
     #[inline(always)]
     pub fn head(&self) -> &AtomicUsize {
-        unsafe { _field!(Queue, self.ptr, head.head.value, AtomicUsize).as_ref() }
+        unsafe { _field!(Queue<O>, self.ptr, head.head.value, AtomicUsize).as_ref() }
     }
 
     #[inline(always)]
     pub fn tail(&self) -> &AtomicUsize {
-        unsafe { _field!(Queue, self.ptr, tail.tail.value, AtomicUsize).as_ref() }
+        unsafe { _field!(Queue<O>, self.ptr, tail.tail.value, AtomicUsize).as_ref() }
+    }
+}
+
+impl<T> ShardQueuePtr<T> {
+    pub(crate) fn try_claim_producer(&self) -> Option<Self> {
+        self.try_clone_as(ShardOwnership::PRODUCER)
+    }
+
+    pub(crate) fn try_claim_consumer(&self) -> Option<Self> {
+        self.try_clone_as(ShardOwnership::CONSUMER)
     }
 }
 
 #[cfg(feature = "async")]
-impl<T> QueuePtr<T> {
+impl<T, O: Ownership> QueuePtr<T, O> {
     #[inline(always)]
     pub fn register_sender_waker(&self, waker: &Waker) {
         unsafe {
-            _field!(Queue, self.ptr, tail.sender_waker.value, AtomicWaker)
+            _field!(Queue<O>, self.ptr, tail.sender_waker.value, AtomicWaker)
                 .as_ref()
                 .register(waker);
         }
@@ -86,7 +98,7 @@ impl<T> QueuePtr<T> {
     #[inline(always)]
     pub fn register_receiver_waker(&self, waker: &Waker) {
         unsafe {
-            _field!(Queue, self.ptr, head.receiver_waker.value, AtomicWaker)
+            _field!(Queue<O>, self.ptr, head.receiver_waker.value, AtomicWaker)
                 .as_ref()
                 .register(waker);
         }
@@ -95,7 +107,7 @@ impl<T> QueuePtr<T> {
     #[inline(always)]
     pub(crate) fn wake_sender(&self) {
         unsafe {
-            _field!(Queue, self.ptr, tail.sender_waker.value, AtomicWaker)
+            _field!(Queue<O>, self.ptr, tail.sender_waker.value, AtomicWaker)
                 .as_ref()
                 .wake();
         }
@@ -104,7 +116,7 @@ impl<T> QueuePtr<T> {
     #[inline(always)]
     pub(crate) fn wake_receiver(&self) {
         unsafe {
-            _field!(Queue, self.ptr, head.receiver_waker.value, AtomicWaker)
+            _field!(Queue<O>, self.ptr, head.receiver_waker.value, AtomicWaker)
                 .as_ref()
                 .wake();
         }

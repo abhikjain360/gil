@@ -10,7 +10,7 @@ use crate::{
 #[repr(C)]
 pub(crate) struct Shards<T> {
     rc: Padded<AtomicUsize>,
-    queue_ptrs: spsc::QueuePtr<T>,
+    queue_ptrs: spsc::queue::ShardQueuePtr<T>,
 }
 
 impl<T> Shards<T> {
@@ -27,14 +27,14 @@ impl<T> Shards<T> {
 
     fn layout(max_shards: usize) -> alloc::Layout {
         let (layout, _offset) = alloc::Layout::new::<Padded<AtomicUsize>>()
-            .extend(alloc::Layout::array::<spsc::QueuePtr<T>>(max_shards).unwrap())
+            .extend(alloc::Layout::array::<spsc::queue::ShardQueuePtr<T>>(max_shards).unwrap())
             .unwrap();
 
         layout.pad_to_align()
     }
 
     #[inline(always)]
-    pub(crate) fn at(ptr: NonNull<Self>, shard: usize) -> NonNull<spsc::QueuePtr<T>> {
+    pub(crate) fn at(ptr: NonNull<Self>, shard: usize) -> NonNull<spsc::queue::ShardQueuePtr<T>> {
         unsafe { _field!(Shards<T>, ptr, queue_ptrs).cast().add(shard) }
     }
 }
@@ -61,7 +61,7 @@ impl<T> ShardsPtr<T> {
 
         for i in 0..max_shards.get() {
             let ptr = Shards::at(ptr, i);
-            unsafe { ptr.write(spsc::QueuePtr::with_size(capacity_per_shard)) };
+            unsafe { ptr.write(spsc::queue::ShardQueuePtr::with_size(capacity_per_shard)) };
         }
 
         Self {
@@ -70,16 +70,18 @@ impl<T> ShardsPtr<T> {
         }
     }
 
-    pub(crate) fn clone_queue_ptr(&self, shard: usize) -> spsc::QueuePtr<T> {
-        unsafe { Shards::at(self.ptr, shard).as_ref() }.clone()
-    }
-
-    pub(crate) fn try_claim_queue_ptr(
+    pub(crate) fn claim_producer_queue_ptr(
         &self,
         shard: usize,
-        ref_count: usize,
-    ) -> Option<spsc::QueuePtr<T>> {
-        unsafe { Shards::at(self.ptr, shard).as_ref() }.try_clone_from_count(ref_count)
+    ) -> Option<spsc::queue::ShardQueuePtr<T>> {
+        unsafe { Shards::at(self.ptr, shard).as_ref() }.try_claim_producer()
+    }
+
+    pub(crate) fn claim_consumer_queue_ptr(
+        &self,
+        shard: usize,
+    ) -> Option<spsc::queue::ShardQueuePtr<T>> {
+        unsafe { Shards::at(self.ptr, shard).as_ref() }.try_claim_consumer()
     }
 
     fn rc(&self) -> &AtomicUsize {

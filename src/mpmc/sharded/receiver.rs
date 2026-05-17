@@ -3,13 +3,14 @@ use core::{cell::UnsafeCell, ptr::NonNull};
 use crate::{
     Backoff, Box,
     padded::Padded,
+    queue::ShardOwnership,
     read_guard::BatchReader,
     spsc::{self, shards::ShardsPtr},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 struct Shared<T> {
-    receivers: Box<[UnsafeCell<spsc::Receiver<T>>]>,
+    receivers: Box<[UnsafeCell<spsc::Receiver<T, ShardOwnership>>]>,
     locks: Box<[Padded<AtomicBool>]>,
     alive_receivers: AtomicUsize,
     max_shards: usize,
@@ -47,7 +48,7 @@ impl<T> Receiver<T> {
         let mut receivers = Box::new_uninit_slice(max_shards);
 
         for i in 0..max_shards {
-            let shard = shards.clone_queue_ptr(i);
+            let shard = shards.claim_consumer_queue_ptr(i).unwrap();
             receivers[i].write(UnsafeCell::new(spsc::Receiver::new(shard)));
 
             locks[i].write(Padded::new(AtomicBool::new(false)));
@@ -256,7 +257,7 @@ impl<T> Receiver<T> {
     ///
     /// The caller must hold this shard's lock.
     #[inline(always)]
-    unsafe fn receiver_mut(&mut self, shard: usize) -> &mut spsc::Receiver<T> {
+    unsafe fn receiver_mut(&mut self, shard: usize) -> &mut spsc::Receiver<T, ShardOwnership> {
         unsafe { &mut *self.shared().receivers[shard].get() }
     }
 

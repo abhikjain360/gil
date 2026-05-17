@@ -11,7 +11,7 @@ use crate::{
 /// The sender writes to shards in strict round-robin fashion, ensuring even
 /// distribution across all receivers.
 pub struct Sender<T> {
-    ptrs: Box<[spsc::QueuePtr<T>]>,
+    ptrs: Box<[spsc::ShardQueuePtr<T>]>,
     local_heads: Box<[usize]>,
     local_tails: Box<[usize]>,
     max_shards: usize,
@@ -23,7 +23,7 @@ impl<T> Sender<T> {
     pub(crate) fn new(shards: ShardsPtr<T>, max_shards: usize) -> Self {
         let mut ptrs = Box::new_uninit_slice(max_shards);
         for i in 0..max_shards {
-            ptrs[i].write(shards.clone_queue_ptr(i));
+            ptrs[i].write(shards.claim_producer_queue_ptr(i).unwrap());
         }
 
         Self {

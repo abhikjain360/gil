@@ -1,5 +1,6 @@
 use crate::{
     Backoff, Box,
+    queue::ShardOwnership,
     read_guard::BatchReader,
     spsc::{self, shards::ShardsPtr},
 };
@@ -24,7 +25,7 @@ use crate::{
 /// assert_eq!(rx.recv(), 2);
 /// ```
 pub struct Receiver<T> {
-    receivers: Box<[spsc::Receiver<T>]>,
+    receivers: Box<[spsc::Receiver<T, ShardOwnership>]>,
     max_shards: usize,
     next_shard: usize,
 }
@@ -34,7 +35,7 @@ impl<T> Receiver<T> {
         let mut receivers = Box::new_uninit_slice(max_shards);
 
         for i in 0..max_shards {
-            let shard = shards.clone_queue_ptr(i);
+            let shard = shards.claim_consumer_queue_ptr(i).unwrap();
             receivers[i].write(spsc::Receiver::new(shard));
         }
 

@@ -74,7 +74,7 @@
 
 use core::num::NonZeroUsize;
 
-pub(crate) use self::queue::QueuePtr;
+pub(crate) use self::queue::ShardQueuePtr;
 #[cfg(feature = "std")]
 pub(crate) mod parking_shards;
 pub(crate) mod shards;

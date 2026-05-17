@@ -13,7 +13,7 @@ use crate::{
 /// When the sender's shard is full, it parks on a shared futex and is woken by the
 /// receiver after it drains items.
 pub struct Sender<T> {
-    ptr: spsc::QueuePtr<T>,
+    ptr: spsc::ShardQueuePtr<T>,
     local_head: usize,
     local_tail: usize,
     futex: NonNull<AtomicU32>,
@@ -24,7 +24,7 @@ pub struct Sender<T> {
 
 impl<T> Sender<T> {
     pub(crate) fn new(shards: ParkingShardsPtr<T>, max_shards: NonZeroUsize) -> Self {
-        Self::init(shards, max_shards.get(), 0, 2).unwrap()
+        Self::init(shards, max_shards.get(), 0).unwrap()
     }
 
     /// Attempts to clone the sender.
@@ -40,7 +40,6 @@ impl<T> Sender<T> {
             self.shards.clone(),
             self.max_shards,
             self.shard.wrapping_add(1),
-            self.ptr.ref_count() - 1,
         )
     }
 
@@ -48,11 +47,10 @@ impl<T> Sender<T> {
         shards: ParkingShardsPtr<T>,
         max_shards: usize,
         start_shard: usize,
-        free_ref_count: usize,
     ) -> Option<Self> {
         for offset in 0..max_shards {
             let shard = start_shard.wrapping_add(offset) % max_shards;
-            if let Some(shard_ptr) = shards.try_claim_queue_ptr(shard, free_ref_count) {
+            if let Some(shard_ptr) = shards.claim_producer_queue_ptr(shard) {
                 let local_head = shard_ptr.head().load(Ordering::Acquire);
                 let local_tail = shard_ptr.tail().load(Ordering::Acquire);
                 let futex = NonNull::from(shards.futex());
@@ -188,8 +186,6 @@ unsafe impl<T> Send for Sender<T> {}
 mod test {
     use core::num::NonZeroUsize;
 
-    use super::*;
-
     #[test]
     fn clone_does_not_claim_live_sender_shard_after_receiver_drop() {
         let (tx0, rx) = super::super::channel::<usize>(
@@ -200,16 +196,7 @@ mod test {
 
         assert!(tx1.clone().is_none());
 
-        let stale_free_ref_count = tx1.ptr.ref_count() - 1;
-        let start_shard = tx1.shard.wrapping_add(1);
-        let shards = tx1.shards.clone();
-        let max_shards = tx1.max_shards;
-
         drop(rx);
-
-        assert!(
-            Sender::init(shards, max_shards, start_shard, stale_free_ref_count).is_none(),
-            "stale refcount let a second sender claim an already occupied shard"
-        );
+        assert!(tx1.clone().is_none());
     }
 }

@@ -11,7 +11,7 @@ use crate::{
 /// Each receiver is bound to a specific shard. When the shard is empty, the
 /// receiver parks on a shared futex and is woken by the sender after writing.
 pub struct Receiver<T> {
-    ptr: spsc::QueuePtr<T>,
+    ptr: spsc::ShardQueuePtr<T>,
     local_head: usize,
     local_tail: usize,
     futex: NonNull<AtomicU32>,
@@ -22,7 +22,7 @@ pub struct Receiver<T> {
 
 impl<T> Receiver<T> {
     pub(crate) fn new(shards: ParkingShardsPtr<T>, max_shards: NonZeroUsize) -> Self {
-        Self::init(shards, max_shards.get(), 0, 2).unwrap()
+        Self::init(shards, max_shards.get(), 0).unwrap()
     }
 
     /// Attempts to clone the receiver.
@@ -38,19 +38,13 @@ impl<T> Receiver<T> {
             self.shards.clone(),
             self.max_shards,
             self.shard.wrapping_add(1),
-            self.ptr.ref_count() - 1,
         )
     }
 
-    fn init(
-        shards: ParkingShardsPtr<T>,
-        max_shards: usize,
-        start_shard: usize,
-        free_ref_count: usize,
-    ) -> Option<Self> {
+    fn init(shards: ParkingShardsPtr<T>, max_shards: usize, start_shard: usize) -> Option<Self> {
         for offset in 0..max_shards {
             let shard = start_shard.wrapping_add(offset) % max_shards;
-            if let Some(shard_ptr) = shards.try_claim_queue_ptr(shard, free_ref_count) {
+            if let Some(shard_ptr) = shards.claim_consumer_queue_ptr(shard) {
                 let local_head = shard_ptr.head().load(Ordering::Acquire);
                 let local_tail = shard_ptr.tail().load(Ordering::Acquire);
                 let futex = NonNull::from(shards.futex());
@@ -183,8 +177,6 @@ unsafe impl<T> BatchReader for Receiver<T> {
 mod test {
     use core::num::NonZeroUsize;
 
-    use super::*;
-
     #[test]
     fn clone_does_not_claim_live_receiver_shard_after_sender_drop() {
         let (tx, rx0) = super::super::channel::<usize>(
@@ -195,16 +187,7 @@ mod test {
 
         assert!(rx1.clone().is_none());
 
-        let stale_free_ref_count = rx1.ptr.ref_count() - 1;
-        let start_shard = rx1.shard.wrapping_add(1);
-        let shards = rx1.shards.clone();
-        let max_shards = rx1.max_shards;
-
         drop(tx);
-
-        assert!(
-            Receiver::init(shards, max_shards, start_shard, stale_free_ref_count).is_none(),
-            "stale refcount let a second receiver claim an already occupied shard"
-        );
+        assert!(rx1.clone().is_none());
     }
 }

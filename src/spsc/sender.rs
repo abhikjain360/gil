@@ -1,6 +1,10 @@
 use core::mem::MaybeUninit;
 
-use crate::{atomic::Ordering, spsc::queue::QueuePtr};
+use crate::{
+    atomic::Ordering,
+    queue::{Ownership, RefCounted},
+    spsc::queue::QueuePtr,
+};
 
 /// The producer end of the SPSC queue.
 ///
@@ -19,14 +23,14 @@ use crate::{atomic::Ordering, spsc::queue::QueuePtr};
 /// assert_eq!(rx.recv(), 1);
 /// assert_eq!(rx.recv(), 2);
 /// ```
-pub struct Sender<T> {
-    ptr: QueuePtr<T>,
+pub struct Sender<T, O: Ownership = RefCounted> {
+    ptr: QueuePtr<T, O>,
     local_head: usize,
     local_tail: usize,
 }
 
-impl<T> Sender<T> {
-    pub(crate) fn new(queue_ptr: QueuePtr<T>) -> Self {
+impl<T, O: Ownership> Sender<T, O> {
+    pub(crate) fn new(queue_ptr: QueuePtr<T, O>) -> Self {
         Self {
             ptr: queue_ptr,
             local_head: 0,
@@ -34,7 +38,7 @@ impl<T> Sender<T> {
         }
     }
 
-    pub(crate) fn from_current(queue_ptr: QueuePtr<T>) -> Self {
+    pub(crate) fn from_current(queue_ptr: QueuePtr<T, O>) -> Self {
         let local_head = queue_ptr.head().load(Ordering::Acquire);
         let local_tail = queue_ptr.tail().load(Ordering::Acquire);
 
@@ -43,10 +47,6 @@ impl<T> Sender<T> {
             local_head,
             local_tail,
         }
-    }
-
-    pub(crate) fn ref_count(&self) -> usize {
-        self.ptr.ref_count()
     }
 
     /// Attempts to send a value into the queue without blocking.
@@ -316,4 +316,4 @@ impl<T> Sender<T> {
     }
 }
 
-unsafe impl<T: Send> Send for Sender<T> {}
+unsafe impl<T: Send, O: Ownership> Send for Sender<T, O> {}

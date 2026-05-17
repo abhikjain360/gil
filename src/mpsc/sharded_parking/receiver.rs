@@ -12,7 +12,7 @@ use crate::{
 /// The receiver polls all shards in round-robin fashion. After consuming items,
 /// it checks a shared futex and wakes any parked senders.
 pub struct Receiver<T> {
-    ptrs: Box<[spsc::QueuePtr<T>]>,
+    ptrs: Box<[spsc::ShardQueuePtr<T>]>,
     local_heads: Box<[usize]>,
     local_tails: Box<[usize]>,
     futex: NonNull<AtomicU32>,
@@ -25,7 +25,7 @@ impl<T> Receiver<T> {
     pub(crate) fn new(shards: ParkingShardsPtr<T>, max_shards: usize) -> Self {
         let mut ptrs = Box::new_uninit_slice(max_shards);
         for i in 0..max_shards {
-            ptrs[i].write(shards.clone_queue_ptr(i));
+            ptrs[i].write(shards.claim_consumer_queue_ptr(i).unwrap());
         }
 
         let futex = NonNull::from(shards.futex());
