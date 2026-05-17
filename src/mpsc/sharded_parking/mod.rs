@@ -60,6 +60,9 @@ pub fn channel<T>(
 
     let shards = ParkingShardsPtr::new(max_shards, capacity_per_shard);
 
+    // The receiver owns the consumer side of every shard. Claim those slots
+    // before creating the first sender so producer ownership is the only
+    // fallible slot acquisition left for sender cloning/reuse.
     let receiver = Receiver::new(shards.clone(), max_shards.get());
     let sender = Sender::new(shards, max_shards);
 

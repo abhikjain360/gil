@@ -54,6 +54,7 @@ impl<T> ParkingShardsPtr<T> {
         self.shared().shards.claim_consumer_queue_ptr(shard)
     }
 
+    #[inline(always)]
     pub(crate) fn futex(&self, shard: usize) -> &AtomicU32 {
         &self.shared().futexes[shard].value
     }

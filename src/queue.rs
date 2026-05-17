@@ -94,7 +94,7 @@ pub(crate) struct Queue<H, T, O: Ownership = RefCounted> {
 }
 
 pub trait DropInitItems<H, T, I> {
-    #[allow(clippy::missing_safety_doc)]
+    #[expect(clippy::missing_safety_doc)]
     unsafe fn drop_init_items(
         head: NonNull<H>,
         tail: NonNull<T>,

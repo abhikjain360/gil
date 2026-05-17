@@ -65,7 +65,7 @@ impl<T> Sender<T> {
     /// // Only 2 shards, so the third clone fails
     /// assert!(tx.clone().is_none());
     /// ```
-    #[allow(clippy::should_implement_trait)]
+    #[expect(clippy::should_implement_trait)]
     pub fn clone(&self) -> Option<Self> {
         Self::init(
             self.shards.clone(),

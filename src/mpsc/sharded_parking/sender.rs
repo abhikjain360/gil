@@ -34,7 +34,7 @@ impl<T> Sender<T> {
     ///
     /// This scans the shard table and may touch up to `max_shards` atomics. Prefer
     /// creating long-lived senders instead of cloning and dropping in a hot path.
-    #[allow(clippy::should_implement_trait)]
+    #[expect(clippy::should_implement_trait)]
     pub fn clone(&self) -> Option<Self> {
         Self::init(
             self.shards.clone(),
