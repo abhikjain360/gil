@@ -10,7 +10,7 @@ use crate::{
 /// Each sender is bound to a specific shard. Cloning a sender will attempt to bind the new
 /// instance to a different, unused shard.
 ///
-/// When the sender's shard is full, it parks on a shared futex and is woken by the
+/// When the sender's shard is full, it parks on that shard's futex and is woken by the
 /// receiver after it drains items.
 pub struct Sender<T> {
     ptr: spsc::ShardQueuePtr<T>,
@@ -53,7 +53,7 @@ impl<T> Sender<T> {
             if let Some(shard_ptr) = shards.claim_producer_queue_ptr(shard) {
                 let local_head = shard_ptr.head().load(Ordering::Acquire);
                 let local_tail = shard_ptr.tail().load(Ordering::Acquire);
-                let futex = NonNull::from(shards.futex());
+                let futex = NonNull::from(shards.futex(shard));
 
                 return Some(Self {
                     ptr: shard_ptr,
@@ -72,7 +72,7 @@ impl<T> Sender<T> {
 
     /// Sends a value into the channel, parking if the shard is full.
     ///
-    /// After a brief spin and yield phase, the sender parks on a shared futex.
+    /// After a brief spin and yield phase, the sender parks on its shard's futex.
     /// The receiver wakes parked senders after draining items.
     pub fn send(&mut self, value: T) {
         let mut backoff = crate::ParkingBackoff::new(16, 4);

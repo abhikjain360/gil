@@ -64,6 +64,7 @@ mod test {
     use super::*;
 
     use crate::thread;
+    use alloc_crate::vec::Vec;
 
     #[test]
     fn basic() {
@@ -136,43 +137,90 @@ mod test {
     }
 
     #[test]
-    fn shared_futex_wakes_receiver_for_written_shard() {
+    fn shard_futex_wakes_receiver_for_written_shard() {
         use std::sync::mpsc::channel as std_channel;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
         use std::time::Duration;
 
-        let (mut tx, rx0) =
-            channel::<usize>(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(1).unwrap());
-        let rx1 = rx0.clone().unwrap();
+        const SHARDS: usize = 8;
+        const ORDERS: [[usize; SHARDS]; 4] = [
+            [1, 2, 3, 0, 4, 5, 6, 7],
+            [7, 6, 5, 0, 4, 3, 2, 1],
+            [2, 4, 6, 0, 1, 3, 5, 7],
+            [7, 5, 3, 0, 6, 4, 2, 1],
+        ];
 
-        let (done_tx, done_rx) = std_channel();
-        let done_tx0 = done_tx.clone();
-        let h0 = thread::spawn(move || {
-            let value = rx0.recv();
-            done_tx0.send((0, value)).unwrap();
-        });
-        let h1 = thread::spawn(move || {
-            let value = rx1.recv();
-            done_tx.send((1, value)).unwrap();
-        });
+        for attempt in 0..10 {
+            let (mut tx, rx0) = channel::<usize>(
+                NonZeroUsize::new(SHARDS).unwrap(),
+                NonZeroUsize::new(1).unwrap(),
+            );
 
-        std::thread::sleep(Duration::from_millis(25));
+            let mut receivers = Vec::new();
+            receivers.push(rx0);
+            for shard in 1..SHARDS {
+                let rx = receivers[shard - 1].clone().unwrap();
+                receivers.push(rx);
+            }
+            let mut receivers: Vec<_> = receivers.into_iter().map(Some).collect();
 
-        tx.send(0);
-        assert_eq!(
-            done_rx.recv_timeout(Duration::from_millis(200)),
-            Ok((0, 0)),
-            "writing to shard 0 must wake the receiver bound to shard 0"
-        );
+            let (done_tx, done_rx) = std_channel();
+            let ready = Arc::new(AtomicUsize::new(0));
+            let mut handles = Vec::new();
+            for shard in ORDERS[attempt % ORDERS.len()] {
+                let mut rx = receivers[shard].take().unwrap();
+                let done_tx = done_tx.clone();
+                let ready = ready.clone();
+                handles.push(thread::spawn(move || {
+                    assert_eq!(rx.try_recv(), None);
+                    ready.fetch_add(1, Ordering::Release);
+                    let value = rx.recv();
+                    done_tx.send((shard, value)).unwrap();
+                }));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(done_tx);
 
-        tx.send(10);
-        assert_eq!(
-            done_rx.recv_timeout(Duration::from_millis(200)),
-            Ok((1, 10)),
-            "writing to shard 1 must wake the receiver bound to shard 1"
-        );
+            while ready.load(Ordering::Acquire) != SHARDS {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(Duration::from_millis(100));
 
-        h0.join().unwrap();
-        h1.join().unwrap();
+            tx.send(0);
+            let first_woken = done_rx.recv_timeout(Duration::from_millis(50));
+            let target_woke = first_woken == Ok((0, 0));
+
+            for shard in 1..SHARDS {
+                tx.send(shard * 10);
+            }
+
+            let mut completed = [false; SHARDS];
+            if let Ok((shard, _value)) = first_woken {
+                completed[shard] = true;
+            }
+            let cleanup_started = std::time::Instant::now();
+            while !completed.iter().all(|done| *done)
+                && cleanup_started.elapsed() < Duration::from_secs(1)
+            {
+                while let Ok((shard, _value)) = done_rx.try_recv() {
+                    completed[shard] = true;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if completed.iter().all(|done| *done) {
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+            }
+
+            assert!(
+                target_woke,
+                "attempt {attempt}: writing to shard 0 did not wake the receiver bound to shard 0; first completion: {first_woken:?}, completed: {completed:?}"
+            );
+        }
     }
 
     #[test]

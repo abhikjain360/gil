@@ -9,7 +9,7 @@ use crate::{
 /// The receiving half of a sharded parking SPMC channel.
 ///
 /// Each receiver is bound to a specific shard. When the shard is empty, the
-/// receiver parks on a shared futex and is woken by the sender after writing.
+/// receiver parks on its shard's futex and is woken by the sender after writing.
 pub struct Receiver<T> {
     ptr: spsc::ShardQueuePtr<T>,
     local_head: usize,
@@ -47,7 +47,7 @@ impl<T> Receiver<T> {
             if let Some(shard_ptr) = shards.claim_consumer_queue_ptr(shard) {
                 let local_head = shard_ptr.head().load(Ordering::Acquire);
                 let local_tail = shard_ptr.tail().load(Ordering::Acquire);
-                let futex = NonNull::from(shards.futex());
+                let futex = NonNull::from(shards.futex(shard));
 
                 return Some(Self {
                     ptr: shard_ptr,
@@ -66,7 +66,7 @@ impl<T> Receiver<T> {
 
     /// Receives a value, parking if the shard is empty.
     ///
-    /// After a brief spin and yield phase, parks on the shared futex.
+    /// After a brief spin and yield phase, parks on the shard's futex.
     /// The sender wakes parked receivers after writing.
     pub fn recv(&mut self) -> T {
         let mut backoff = crate::ParkingBackoff::new(16, 4);

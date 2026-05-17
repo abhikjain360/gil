@@ -9,7 +9,7 @@ use crate::{
 
 struct ParkingShards<T> {
     rc: Padded<AtomicUsize>,
-    futex: Padded<AtomicU32>,
+    futexes: Box<[Padded<AtomicU32>]>,
     shards: ShardsPtr<T>,
 }
 
@@ -29,7 +29,9 @@ impl<T> ParkingShardsPtr<T> {
     pub fn new(max_shards: NonZeroUsize, capacity_per_shard: NonZeroUsize) -> Self {
         let shared = Box::new(ParkingShards {
             rc: Padded::new(AtomicUsize::new(1)),
-            futex: Padded::new(AtomicU32::new(0)),
+            futexes: (0..max_shards.get())
+                .map(|_| Padded::new(AtomicU32::new(0)))
+                .collect(),
             shards: ShardsPtr::new(max_shards, capacity_per_shard),
         });
 
@@ -52,8 +54,8 @@ impl<T> ParkingShardsPtr<T> {
         self.shared().shards.claim_consumer_queue_ptr(shard)
     }
 
-    pub(crate) fn futex(&self) -> &AtomicU32 {
-        &self.shared().futex.value
+    pub(crate) fn futex(&self, shard: usize) -> &AtomicU32 {
+        &self.shared().futexes[shard].value
     }
 
     #[inline(always)]
