@@ -258,4 +258,4 @@ unsafe impl<T> BatchReader for Receiver<T> {
     }
 }
 
-unsafe impl<T> Send for Receiver<T> {}
+unsafe impl<T: Send> Send for Receiver<T> {}

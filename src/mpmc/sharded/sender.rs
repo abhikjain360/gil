@@ -191,7 +191,7 @@ impl<T> Sender<T> {
     }
 }
 
-unsafe impl<T> Send for Sender<T> {}
+unsafe impl<T: Send> Send for Sender<T> {}
 
 #[cfg(all(test, not(feature = "loom")))]
 mod test {

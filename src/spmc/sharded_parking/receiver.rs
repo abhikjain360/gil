@@ -129,7 +129,7 @@ impl<T> Receiver<T> {
     }
 }
 
-unsafe impl<T> Send for Receiver<T> {}
+unsafe impl<T: Send> Send for Receiver<T> {}
 
 /// # Safety
 ///

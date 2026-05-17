@@ -156,4 +156,4 @@ impl<T> Sender<T> {
     }
 }
 
-unsafe impl<T> Send for Sender<T> {}
+unsafe impl<T: Send> Send for Sender<T> {}
