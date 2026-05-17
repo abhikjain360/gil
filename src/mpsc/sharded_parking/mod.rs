@@ -255,6 +255,51 @@ mod test {
     }
 
     #[test]
+    fn shared_futex_wakes_sender_for_freed_shard() {
+        use std::sync::mpsc::channel as std_channel;
+        use std::time::Duration;
+
+        let (mut tx0, mut rx) =
+            channel::<usize>(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(1).unwrap());
+        let mut tx1 = tx0.clone().unwrap();
+
+        tx0.send(0);
+        tx1.send(10);
+
+        let (done_tx, done_rx) = std_channel();
+        let done_tx0 = done_tx.clone();
+        let h0 = thread::spawn(move || {
+            tx0.send(1);
+            done_tx0.send(0).unwrap();
+        });
+        let h1 = thread::spawn(move || {
+            tx1.send(11);
+            done_tx.send(1).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(25));
+
+        assert_eq!(rx.recv(), 0);
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_millis(200)),
+            Ok(0),
+            "freeing shard 0 must wake the sender bound to shard 0"
+        );
+
+        assert_eq!(rx.recv(), 10);
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_millis(200)),
+            Ok(1),
+            "freeing shard 1 must wake the sender bound to shard 1"
+        );
+
+        assert_eq!(rx.recv(), 1);
+        assert_eq!(rx.recv(), 11);
+        h0.join().unwrap();
+        h1.join().unwrap();
+    }
+
+    #[test]
     fn test_sender_parks_and_wakes() {
         let (mut tx, mut rx) =
             channel::<usize>(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(2).unwrap());
