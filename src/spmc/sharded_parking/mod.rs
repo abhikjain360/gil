@@ -136,6 +136,46 @@ mod test {
     }
 
     #[test]
+    fn shared_futex_wakes_receiver_for_written_shard() {
+        use std::sync::mpsc::channel as std_channel;
+        use std::time::Duration;
+
+        let (mut tx, rx0) =
+            channel::<usize>(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(1).unwrap());
+        let rx1 = rx0.clone().unwrap();
+
+        let (done_tx, done_rx) = std_channel();
+        let done_tx0 = done_tx.clone();
+        let h0 = thread::spawn(move || {
+            let value = rx0.recv();
+            done_tx0.send((0, value)).unwrap();
+        });
+        let h1 = thread::spawn(move || {
+            let value = rx1.recv();
+            done_tx.send((1, value)).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(25));
+
+        tx.send(0);
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_millis(200)),
+            Ok((0, 0)),
+            "writing to shard 0 must wake the receiver bound to shard 0"
+        );
+
+        tx.send(10);
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_millis(200)),
+            Ok((1, 10)),
+            "writing to shard 1 must wake the receiver bound to shard 1"
+        );
+
+        h0.join().unwrap();
+        h1.join().unwrap();
+    }
+
+    #[test]
     fn test_receiver_parks_and_wakes() {
         let (mut tx, mut rx) = channel::<usize>(
             NonZeroUsize::new(1).unwrap(),
