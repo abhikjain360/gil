@@ -1,8 +1,7 @@
-use core::{num::NonZeroUsize, ptr::NonNull};
+use core::num::NonZeroUsize;
 
 use crate::{
-    Box,
-    atomic::{AtomicUsize, Ordering},
+    atomic::Ordering,
     read_guard::BatchReader,
     spsc::{self, shards::ShardsPtr},
 };
@@ -12,54 +11,54 @@ use crate::{
 /// Each receiver is bound to a specific shard. Cloning a receiver will attempt to bind
 /// the new instance to a different, unused shard.
 pub struct Receiver<T> {
-    ptr: spsc::QueuePtr<T>,
+    ptr: spsc::ShardQueuePtr<T>,
     local_head: usize,
     local_tail: usize,
     shards: ShardsPtr<T>,
-    num_receivers: NonNull<AtomicUsize>,
     max_shards: usize,
+    shard: usize,
 }
 
 impl<T> Receiver<T> {
     pub(crate) fn new(shards: ShardsPtr<T>, max_shards: NonZeroUsize) -> Self {
-        let num_receivers_ptr = Box::into_raw(Box::new(AtomicUsize::new(0)));
-        unsafe {
-            let num_receivers = NonNull::new_unchecked(num_receivers_ptr);
-            Self::init(shards, max_shards.get(), num_receivers).unwrap_unchecked()
-        }
+        Self::init(shards, max_shards.get(), 0).unwrap()
     }
 
     /// Attempts to clone the receiver.
     ///
     /// Returns `Some(Receiver)` if there is an available shard to bind to, or `None` if
     /// all shards are already occupied.
-    #[allow(clippy::should_implement_trait)]
+    ///
+    /// This scans the shard table and may touch up to `max_shards` atomics. Prefer
+    /// creating long-lived receivers instead of cloning and dropping in a hot path.
+    #[expect(clippy::should_implement_trait)]
     pub fn clone(&self) -> Option<Self> {
-        unsafe { Self::init(self.shards.clone(), self.max_shards, self.num_receivers) }
+        Self::init(
+            self.shards.clone(),
+            self.max_shards,
+            self.shard.wrapping_add(1),
+        )
     }
 
-    unsafe fn init(
-        shards: ShardsPtr<T>,
-        max_shards: usize,
-        num_receivers: NonNull<AtomicUsize>,
-    ) -> Option<Self> {
-        let num_receivers_ref = unsafe { num_receivers.as_ref() };
-        let next_shard = num_receivers_ref.fetch_add(1, Ordering::AcqRel);
-        if next_shard >= max_shards {
-            num_receivers_ref.fetch_sub(1, Ordering::AcqRel);
-            return None;
+    fn init(shards: ShardsPtr<T>, max_shards: usize, start_shard: usize) -> Option<Self> {
+        for offset in 0..max_shards {
+            let shard = start_shard.wrapping_add(offset) % max_shards;
+            if let Some(shard_ptr) = shards.claim_consumer_queue_ptr(shard) {
+                let local_head = shard_ptr.head().load(Ordering::Acquire);
+                let local_tail = shard_ptr.tail().load(Ordering::Acquire);
+
+                return Some(Self {
+                    ptr: shard_ptr,
+                    local_head,
+                    local_tail,
+                    shards,
+                    max_shards,
+                    shard,
+                });
+            }
         }
 
-        let shard_ptr = shards.clone_queue_ptr(next_shard);
-
-        Some(Self {
-            ptr: shard_ptr,
-            local_head: 0,
-            local_tail: 0,
-            shards,
-            num_receivers,
-            max_shards,
-        })
+        None
     }
 
     /// Receives a value, spinning/yielding until one is available.
@@ -106,15 +105,6 @@ impl<T> Receiver<T> {
     }
 }
 
-impl<T> Drop for Receiver<T> {
-    fn drop(&mut self) {
-        let num_receivers_ref = unsafe { self.num_receivers.as_ref() };
-        if num_receivers_ref.fetch_sub(1, Ordering::AcqRel) == 1 {
-            _ = unsafe { Box::from_raw(self.num_receivers.as_ptr()) };
-        }
-    }
-}
-
 unsafe impl<T> Send for Receiver<T> {}
 
 /// # Safety
@@ -156,5 +146,24 @@ unsafe impl<T> BatchReader for Receiver<T> {
         let new_head = self.local_head.wrapping_add(n);
         self.store_head(new_head);
         self.local_head = new_head;
+    }
+}
+
+#[cfg(all(test, not(feature = "loom")))]
+mod test {
+    use core::num::NonZeroUsize;
+
+    #[test]
+    fn clone_does_not_claim_live_receiver_shard_after_sender_drop() {
+        let (tx, rx0) = super::super::channel::<usize>(
+            NonZeroUsize::new(2).unwrap(),
+            NonZeroUsize::new(4).unwrap(),
+        );
+        let rx1 = rx0.clone().unwrap();
+
+        assert!(rx1.clone().is_none());
+
+        drop(tx);
+        assert!(rx1.clone().is_none());
     }
 }

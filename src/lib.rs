@@ -9,7 +9,7 @@ extern crate std;
 pub(crate) use alloc_crate::alloc;
 pub(crate) use alloc_crate::boxed::Box;
 
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 #[cfg(not(feature = "loom"))]
 pub(crate) use core::{
     cell as std_cell, hint,
@@ -23,7 +23,7 @@ pub(crate) mod thread {
     pub(crate) use core::hint::spin_loop as yield_now;
 }
 
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 #[cfg(feature = "loom")]
 pub(crate) use loom::{
     cell as std_cell, hint,
@@ -38,7 +38,6 @@ pub(crate) mod alloc {
     pub use loom::alloc::dealloc;
 }
 
-#[allow(unused_macros)]
 macro_rules! _field {
     ($ty:ty, $ptr:expr, $($path:tt).+) => {
         $ptr.byte_add(core::mem::offset_of!($ty, $($path).+))

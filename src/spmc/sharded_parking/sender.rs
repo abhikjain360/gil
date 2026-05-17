@@ -2,41 +2,37 @@ use core::mem::MaybeUninit;
 
 use crate::{
     Backoff, Box,
-    atomic::{AtomicU32, Ordering},
+    atomic::Ordering,
     spsc::{self, parking_shards::ParkingShardsPtr},
 };
 
 /// The sending half of a sharded parking SPMC channel.
 ///
 /// The sender writes to shards in strict round-robin fashion. After writing,
-/// it checks the shared futex and wakes any parked receiver.
+/// it checks that shard's futex and wakes its parked receiver, if any.
 pub struct Sender<T> {
-    ptrs: Box<[spsc::QueuePtr<T>]>,
+    ptrs: Box<[spsc::ShardQueuePtr<T>]>,
     local_heads: Box<[usize]>,
     local_tails: Box<[usize]>,
-    futex: *const AtomicU32,
     max_shards: usize,
     next_shard: usize,
-    _shards: ParkingShardsPtr<T>,
+    shards: ParkingShardsPtr<T>,
 }
 
 impl<T> Sender<T> {
     pub(crate) fn new(shards: ParkingShardsPtr<T>, max_shards: usize) -> Self {
         let mut ptrs = Box::new_uninit_slice(max_shards);
         for i in 0..max_shards {
-            ptrs[i].write(shards.clone_queue_ptr(i));
+            ptrs[i].write(shards.claim_producer_queue_ptr(i).unwrap());
         }
-
-        let futex: *const AtomicU32 = shards.futex();
 
         Self {
             ptrs: unsafe { ptrs.assume_init() },
             local_heads: core::iter::repeat_n(0, max_shards).collect(),
             local_tails: core::iter::repeat_n(0, max_shards).collect(),
-            futex,
             max_shards,
             next_shard: 0,
-            _shards: shards,
+            shards,
         }
     }
 
@@ -57,7 +53,7 @@ impl<T> Sender<T> {
         self.store_tail(shard, new_tail);
         self.local_tails[shard] = new_tail;
 
-        self.wake_receivers();
+        self.wake_receivers(shard);
 
         self.next_shard += 1;
         if self.next_shard == self.max_shards {
@@ -83,7 +79,7 @@ impl<T> Sender<T> {
         self.store_tail(shard, new_tail);
         self.local_tails[shard] = new_tail;
 
-        self.wake_receivers();
+        self.wake_receivers(shard);
 
         self.next_shard += 1;
         if self.next_shard == self.max_shards {
@@ -141,7 +137,7 @@ impl<T> Sender<T> {
         self.store_tail(shard, new_tail);
         self.local_tails[shard] = new_tail;
 
-        self.wake_receivers();
+        self.wake_receivers(shard);
 
         self.next_shard += 1;
         if self.next_shard == self.max_shards {
@@ -151,8 +147,8 @@ impl<T> Sender<T> {
 
     /// Dekker pattern: after store_tail(Release), load futex with SeqCst.
     #[inline(always)]
-    fn wake_receivers(&self) {
-        let futex = unsafe { &*self.futex };
+    fn wake_receivers(&self, shard: usize) {
+        let futex = self.shards.futex(shard);
         if futex.load(Ordering::SeqCst) != 0 {
             futex.store(0, Ordering::Relaxed);
             atomic_wait::wake_one(futex);

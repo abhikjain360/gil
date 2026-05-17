@@ -1,4 +1,9 @@
-use crate::{atomic::Ordering, read_guard::BatchReader, spsc::queue::QueuePtr};
+use crate::{
+    atomic::Ordering,
+    queue::{Ownership, RefCounted},
+    read_guard::BatchReader,
+    spsc::queue::QueuePtr,
+};
 
 #[cfg(feature = "async")]
 use core::{
@@ -23,27 +28,18 @@ use core::{
 /// assert_eq!(rx.recv(), 1);
 /// assert_eq!(rx.recv(), 2);
 /// ```
-pub struct Receiver<T> {
-    pub ptr: QueuePtr<T>,
+pub struct Receiver<T, O: Ownership = RefCounted> {
+    pub ptr: QueuePtr<T, O>,
     pub local_tail: usize,
     pub local_head: usize,
 }
 
-impl<T> Receiver<T> {
-    pub(crate) fn new(queue_ptr: QueuePtr<T>) -> Self {
+impl<T, O: Ownership> Receiver<T, O> {
+    pub(crate) fn new(queue_ptr: QueuePtr<T, O>) -> Self {
         Self {
             ptr: queue_ptr,
             local_tail: 0,
             local_head: 0,
-        }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.local_head == self.local_tail && {
-            // relaxed load is enough as we are only checking for emptiness hint
-            // to avoid expensive locking in sharded implementation
-            let tail = self.ptr.tail().load(Ordering::Relaxed);
-            self.local_head == tail
         }
     }
 
@@ -244,23 +240,14 @@ impl<T> Receiver<T> {
             self.local_tail = self.ptr.tail().load(Ordering::Acquire);
         }
     }
-
-    /// # Safety
-    /// Caller needs to ensure that only one receiver ever access the the `self.ptr` at any time.
-    #[inline(always)]
-    pub(crate) unsafe fn clone_via_ptr(&self) -> Self {
-        Self {
-            ptr: self.ptr.clone(),
-            local_tail: self.local_tail,
-            local_head: self.local_head,
-        }
-    }
 }
 
-unsafe impl<T: Send> Send for Receiver<T> {}
+unsafe impl<T: Send, O: Ownership> Send for Receiver<T, O> {}
+
+impl<T, O: Ownership> Unpin for Receiver<T, O> {}
 
 #[cfg(feature = "async")]
-impl<T> futures::Stream for Receiver<T> {
+impl<T, O: Ownership> futures::Stream for Receiver<T, O> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -274,7 +261,7 @@ impl<T> futures::Stream for Receiver<T> {
 /// `read_buffer` refreshes the cached tail and returns a contiguous slice from
 /// the ring buffer.  `advance` publishes the new head via a `Release` store and
 /// wakes the sender when the `async` feature is enabled.
-unsafe impl<T> BatchReader for Receiver<T> {
+unsafe impl<T, O: Ownership> BatchReader for Receiver<T, O> {
     type Item = T;
 
     /// Returns a slice of the available read buffer in the queue.

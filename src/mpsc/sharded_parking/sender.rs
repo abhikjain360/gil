@@ -1,8 +1,7 @@
 use core::{mem::MaybeUninit, num::NonZeroUsize, ptr::NonNull};
 
 use crate::{
-    Box,
-    atomic::{AtomicU32, AtomicUsize, Ordering},
+    atomic::{AtomicU32, Ordering},
     spsc::{self, parking_shards::ParkingShardsPtr},
 };
 
@@ -11,65 +10,69 @@ use crate::{
 /// Each sender is bound to a specific shard. Cloning a sender will attempt to bind the new
 /// instance to a different, unused shard.
 ///
-/// When the sender's shard is full, it parks on a shared futex and is woken by the
+/// When the sender's shard is full, it parks on that shard's futex and is woken by the
 /// receiver after it drains items.
 pub struct Sender<T> {
-    ptr: spsc::QueuePtr<T>,
+    ptr: spsc::ShardQueuePtr<T>,
     local_head: usize,
     local_tail: usize,
     futex: NonNull<AtomicU32>,
     shards: ParkingShardsPtr<T>,
-    num_senders: NonNull<AtomicUsize>,
     max_shards: usize,
+    shard: usize,
 }
 
 impl<T> Sender<T> {
     pub(crate) fn new(shards: ParkingShardsPtr<T>, max_shards: NonZeroUsize) -> Self {
-        let num_senders_ptr = Box::into_raw(Box::new(AtomicUsize::new(0)));
-        unsafe {
-            let num_senders = NonNull::new_unchecked(num_senders_ptr);
-            Self::init(shards, max_shards.get(), num_senders).unwrap_unchecked()
-        }
+        Self::init(shards, max_shards.get(), 0).unwrap()
     }
 
     /// Attempts to clone the sender.
     ///
     /// Returns `Some(Sender)` if there is an available shard to bind to, or `None` if
     /// all shards are already occupied.
-    #[allow(clippy::should_implement_trait)]
+    ///
+    /// This scans the shard table and may touch up to `max_shards` atomics. Prefer
+    /// creating long-lived senders instead of cloning and dropping in a hot path.
+    #[expect(clippy::should_implement_trait)]
     pub fn clone(&self) -> Option<Self> {
-        unsafe { Self::init(self.shards.clone(), self.max_shards, self.num_senders) }
+        Self::init(
+            self.shards.clone(),
+            self.max_shards,
+            self.shard.wrapping_add(1),
+        )
     }
 
-    pub(crate) unsafe fn init(
+    pub(crate) fn init(
         shards: ParkingShardsPtr<T>,
         max_shards: usize,
-        num_senders: NonNull<AtomicUsize>,
+        start_shard: usize,
     ) -> Option<Self> {
-        let num_senders_ref = unsafe { num_senders.as_ref() };
-        let next_shard = num_senders_ref.fetch_add(1, Ordering::AcqRel);
-        if next_shard >= max_shards {
-            num_senders_ref.fetch_sub(1, Ordering::AcqRel);
-            return None;
+        for offset in 0..max_shards {
+            let shard = start_shard.wrapping_add(offset) % max_shards;
+            if let Some(shard_ptr) = shards.claim_producer_queue_ptr(shard) {
+                let local_head = shard_ptr.head().load(Ordering::Acquire);
+                let local_tail = shard_ptr.tail().load(Ordering::Acquire);
+                let futex = NonNull::from(shards.futex(shard));
+
+                return Some(Self {
+                    ptr: shard_ptr,
+                    local_head,
+                    local_tail,
+                    futex,
+                    shards,
+                    max_shards,
+                    shard,
+                });
+            }
         }
 
-        let shard_ptr = shards.clone_queue_ptr(next_shard);
-        let futex = NonNull::from(shards.futex());
-
-        Some(Self {
-            ptr: shard_ptr,
-            local_head: 0,
-            local_tail: 0,
-            futex,
-            shards,
-            num_senders,
-            max_shards,
-        })
+        None
     }
 
     /// Sends a value into the channel, parking if the shard is full.
     ///
-    /// After a brief spin and yield phase, the sender parks on a shared futex.
+    /// After a brief spin and yield phase, the sender parks on its shard's futex.
     /// The receiver wakes parked senders after draining items.
     pub fn send(&mut self, value: T) {
         let mut backoff = crate::ParkingBackoff::new(16, 4);
@@ -177,13 +180,23 @@ impl<T> Sender<T> {
     }
 }
 
-impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {
-        let num_senders_ref = unsafe { self.num_senders.as_ref() };
-        if num_senders_ref.fetch_sub(1, Ordering::AcqRel) == 1 {
-            _ = unsafe { Box::from_raw(self.num_senders.as_ptr()) };
-        }
+unsafe impl<T> Send for Sender<T> {}
+
+#[cfg(all(test, not(feature = "loom")))]
+mod test {
+    use core::num::NonZeroUsize;
+
+    #[test]
+    fn clone_does_not_claim_live_sender_shard_after_receiver_drop() {
+        let (tx0, rx) = super::super::channel::<usize>(
+            NonZeroUsize::new(2).unwrap(),
+            NonZeroUsize::new(4).unwrap(),
+        );
+        let tx1 = tx0.clone().unwrap();
+
+        assert!(tx1.clone().is_none());
+
+        drop(rx);
+        assert!(tx1.clone().is_none());
     }
 }
-
-unsafe impl<T> Send for Sender<T> {}

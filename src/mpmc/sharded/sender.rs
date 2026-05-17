@@ -1,9 +1,8 @@
-use core::{mem::MaybeUninit, num::NonZeroUsize, ptr::NonNull};
+use core::{mem::MaybeUninit, num::NonZeroUsize};
 
 use crate::{
-    Box,
+    queue::ShardOwnership,
     spsc::{self, shards::ShardsPtr},
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
 /// The sending half of a sharded MPMC channel.
@@ -31,11 +30,10 @@ use crate::{
 /// assert_eq!(values, [1, 2]);
 /// ```
 pub struct Sender<T> {
-    inner: spsc::Sender<T>,
+    inner: spsc::Sender<T, ShardOwnership>,
     shards: ShardsPtr<T>,
-    num_senders: NonNull<AtomicUsize>,
-    alive_senders: NonNull<AtomicUsize>,
     max_shards: usize,
+    shard: usize,
 }
 
 impl<T> Sender<T> {
@@ -43,6 +41,9 @@ impl<T> Sender<T> {
     ///
     /// Returns `Some(Sender)` if there is an available shard to bind to, or `None` if
     /// all shards are already occupied.
+    ///
+    /// This scans the shard table and may touch up to `max_shards` atomics. Prefer
+    /// creating long-lived senders instead of cloning and dropping in a hot path.
     ///
     /// # Examples
     ///
@@ -61,52 +62,33 @@ impl<T> Sender<T> {
     /// assert!(tx.try_clone().is_none());
     /// ```
     pub fn try_clone(&self) -> Option<Self> {
-        unsafe {
-            Self::init(
-                self.shards.clone(),
-                self.max_shards,
-                self.num_senders,
-                self.alive_senders,
-            )
-        }
+        Self::init(
+            self.shards.clone(),
+            self.max_shards,
+            self.shard.wrapping_add(1),
+        )
     }
 
     pub(super) fn new(shards: ShardsPtr<T>, max_shards: NonZeroUsize) -> Self {
-        let num_senders_ptr = Box::into_raw(Box::new(AtomicUsize::new(0)));
-        let alive_senders_ptr = Box::into_raw(Box::new(AtomicUsize::new(0)));
-        unsafe {
-            let num_senders = NonNull::new_unchecked(num_senders_ptr);
-            let alive_senders = NonNull::new_unchecked(alive_senders_ptr);
-            Self::init(shards, max_shards.get(), num_senders, alive_senders).unwrap_unchecked()
-        }
+        Self::init(shards, max_shards.get(), 0).unwrap()
     }
 
-    unsafe fn init(
-        shards: ShardsPtr<T>,
-        max_shards: usize,
-        num_senders: NonNull<AtomicUsize>,
-        alive_senders: NonNull<AtomicUsize>,
-    ) -> Option<Self> {
-        let num_senders_ref = unsafe { num_senders.as_ref() };
-        let next_shard = num_senders_ref.fetch_add(1, Ordering::Relaxed);
-        if next_shard >= max_shards {
-            num_senders_ref.store(max_shards, Ordering::Relaxed);
-            return None;
+    fn init(shards: ShardsPtr<T>, max_shards: usize, start_shard: usize) -> Option<Self> {
+        for offset in 0..max_shards {
+            let shard = start_shard.wrapping_add(offset) % max_shards;
+            if let Some(shard_ptr) = shards.claim_producer_queue_ptr(shard) {
+                let inner = spsc::Sender::from_current(shard_ptr);
+
+                return Some(Self {
+                    inner,
+                    shards,
+                    max_shards,
+                    shard,
+                });
+            }
         }
 
-        // AcqRel because can't have this before num_senders is done
-        unsafe { alive_senders.as_ref() }.fetch_add(1, Ordering::AcqRel);
-
-        let shard_ptr = shards.clone_queue_ptr(next_shard);
-        let inner = spsc::Sender::new(shard_ptr);
-
-        Some(Self {
-            inner,
-            shards,
-            num_senders,
-            alive_senders,
-            max_shards,
-        })
+        None
     }
 
     /// Sends a value into the channel.
@@ -209,15 +191,23 @@ impl<T> Sender<T> {
     }
 }
 
-impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {
-        unsafe {
-            if self.alive_senders.as_ref().fetch_sub(1, Ordering::AcqRel) == 1 {
-                _ = Box::from_raw(self.num_senders.as_ptr());
-                _ = Box::from_raw(self.alive_senders.as_ptr());
-            }
-        }
+unsafe impl<T> Send for Sender<T> {}
+
+#[cfg(all(test, not(feature = "loom")))]
+mod test {
+    use core::num::NonZeroUsize;
+
+    #[test]
+    fn try_clone_does_not_claim_live_sender_shard_after_receiver_drop() {
+        let (tx0, rx) = super::super::channel::<usize>(
+            NonZeroUsize::new(2).unwrap(),
+            NonZeroUsize::new(4).unwrap(),
+        );
+        let tx1 = tx0.try_clone().unwrap();
+
+        assert!(tx1.try_clone().is_none());
+
+        drop(rx);
+        assert!(tx1.try_clone().is_none());
     }
 }
-
-unsafe impl<T> Send for Sender<T> {}
