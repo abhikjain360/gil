@@ -97,6 +97,7 @@ pub fn channel<T>(
 
     let shards = ShardsPtr::new(max_shards, capacity_per_shard);
 
+    // initializing receiver first so that sender creation does not panic because of incorrect rc count
     let receiver = receiver::Receiver::new(shards.clone(), max_shards.get());
     let sender = sender::Sender::new(shards, max_shards);
 

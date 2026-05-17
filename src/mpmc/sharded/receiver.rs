@@ -8,11 +8,9 @@ use crate::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-type Lock = Padded<AtomicBool>;
-
 struct Shared<T> {
     receivers: Box<[spsc::Receiver<T>]>,
-    locks: Box<[Lock]>,
+    locks: Box<[Padded<AtomicBool>]>,
     alive_receivers: AtomicUsize,
     max_shards: usize,
 }
@@ -45,7 +43,7 @@ pub struct Receiver<T> {
 
 impl<T> Receiver<T> {
     pub(super) fn new(shards: ShardsPtr<T>, max_shards: usize) -> Self {
-        let mut locks = Box::<[Lock]>::new_uninit_slice(max_shards);
+        let mut locks = Box::<[Padded<AtomicBool>]>::new_uninit_slice(max_shards);
         let mut receivers = Box::new_uninit_slice(max_shards);
 
         for i in 0..max_shards {
@@ -94,11 +92,14 @@ impl<T> Receiver<T> {
                 return None;
             }
 
+            // need cas instead of fetch_add to accidentally avoid creating more than N clones
+            // TODO: do we really need to limit receivers to N? makes sense for senders but
+            //       receivers to round-robin so more than N can work just fine
             match shared.alive_receivers.compare_exchange(
                 live,
                 live + 1,
                 Ordering::AcqRel,
-                Ordering::Acquire,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => live = actual,
