@@ -129,7 +129,7 @@ To use async features, enable the `async` feature in your `Cargo.toml`.
 
 ```toml
 [dependencies]
-gil = { version = "0.5", features = ["async"] }
+gil = { version = "0.9", features = ["async"] }
 ```
 
 ```rust,ignore
