@@ -154,3 +154,33 @@ unsafe impl<T> BatchReader for Receiver<T> {
         self.local_head = new_head;
     }
 }
+
+#[cfg(all(test, not(feature = "loom")))]
+mod test {
+    use core::num::NonZeroUsize;
+
+    use super::*;
+
+    #[test]
+    fn clone_does_not_claim_live_receiver_shard_after_sender_drop() {
+        let (tx, rx0) = super::super::channel::<usize>(
+            NonZeroUsize::new(2).unwrap(),
+            NonZeroUsize::new(4).unwrap(),
+        );
+        let rx1 = rx0.clone().unwrap();
+
+        assert!(rx1.clone().is_none());
+
+        let stale_free_ref_count = rx1.ptr.ref_count() - 1;
+        let start_shard = rx1.shard.wrapping_add(1);
+        let shards = rx1.shards.clone();
+        let max_shards = rx1.max_shards;
+
+        drop(tx);
+
+        assert!(
+            Receiver::init(shards, max_shards, start_shard, stale_free_ref_count).is_none(),
+            "stale refcount let a second receiver claim an already occupied shard"
+        );
+    }
+}

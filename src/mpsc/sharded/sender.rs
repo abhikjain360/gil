@@ -196,3 +196,33 @@ impl<T> Sender<T> {
 }
 
 unsafe impl<T> Send for Sender<T> {}
+
+#[cfg(all(test, not(feature = "loom")))]
+mod test {
+    use core::num::NonZeroUsize;
+
+    use super::*;
+
+    #[test]
+    fn clone_does_not_claim_live_sender_shard_after_receiver_drop() {
+        let (tx0, rx) = super::super::channel::<usize>(
+            NonZeroUsize::new(2).unwrap(),
+            NonZeroUsize::new(4).unwrap(),
+        );
+        let tx1 = tx0.clone().unwrap();
+
+        assert!(tx1.clone().is_none());
+
+        let stale_free_ref_count = tx1.inner.ref_count() - 1;
+        let start_shard = tx1.shard.wrapping_add(1);
+        let shards = tx1.shards.clone();
+        let max_shards = tx1.max_shards;
+
+        drop(rx);
+
+        assert!(
+            Sender::init(shards, max_shards, start_shard, stale_free_ref_count).is_none(),
+            "stale refcount let a second sender claim an already occupied shard"
+        );
+    }
+}
