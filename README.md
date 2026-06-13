@@ -53,7 +53,7 @@ for i in 0..10 {
 }
 
 for _ in 0..10 {
-    let _ = rx.recv();
+    _ = rx.recv();
 }
 
 for handle in handles {
@@ -85,7 +85,7 @@ for i in 0..5 {
 for _ in 0..5 {
     let mut rx_clone = rx.clone();
     handles.push(thread::spawn(move || {
-        let _ = rx_clone.recv();
+        _ = rx_clone.recv();
     }));
 }
 
@@ -243,6 +243,7 @@ let value = rx.recv();
 ## Safety
 
 The code has been verified using:
+
 - [loom](https://github.com/tokio-rs/loom) - Concurrency testing
 - [miri](https://github.com/rust-lang/miri) - Undefined behavior detection
 

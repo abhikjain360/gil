@@ -8,13 +8,23 @@
 //! * **Waker:** publish the new head/tail, then check the futex word and wake
 //!   ([`wake`](Futex::wake) / [`wake_all`](Futex::wake_all)) if anyone announced.
 //!
-//! The recheck-after-announce is what prevents lost wakes, and it only works if
-//! the announce store cannot be reordered after the recheck load — hence the
-//! `SeqCst` CAS in `announce`. Symmetrically the waker's futex load must not be
-//! reordered before its index store, hence the `SeqCst` accesses in `wake` and
-//! `wake_all`. With that ordering, either the waiter's recheck sees the waker's
-//! published index (and skips sleeping), or the waker's load sees the announce
-//! (and wakes).
+//! Both sides are a store-then-load on *different* locations (waiter: store
+//! word, load index; waker: store index, load word). That shape needs a
+//! `SeqCst` **fence** between the store and the load on both sides — `SeqCst`
+//! on the accesses themselves is not enough. In particular, a `SeqCst` load is
+//! not ordered after an earlier `Release` store to another location: on x86
+//! both compile to plain `mov`s, and the store can sit in the store buffer
+//! while the load executes, exactly the store-buffer litmus that loses the
+//! wake. (AArch64 happens to forbid it — `ldar` cannot pass an earlier `stlr`
+//! — which is why the weaker form never misbehaved on Apple Silicon.)
+//!
+//! The two fences are totally ordered. If the waiter's fence comes first, the
+//! waker's post-fence load sees the announce and wakes; if the waker's fence
+//! comes first, the waiter's post-fence recheck sees the published index and
+//! skips sleeping. Either way the wake cannot be lost. The fences live in
+//! [`announce`](Futex::announce) and [`wake`](Futex::wake) /
+//! [`wake_all`](Futex::wake_all), so callers only have to keep the protocol
+//! order: announce → recheck → sleep, and publish → wake.
 //!
 //! Under `loom` the futex word is still modelled, but the actual OS park/wake is
 //! compiled out: `sleep` degrades to a yield (loom cannot model `atomic_wait`,
@@ -25,7 +35,7 @@
 use core::ptr::NonNull;
 
 use crate::{
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicU32, Ordering, fence},
     queue::{DropInFlight, Ownership, QueuePtr},
 };
 
@@ -56,13 +66,21 @@ impl Futex {
     /// retry its operation instead.
     #[inline(always)]
     pub(crate) fn announce(self, who: u32) -> bool {
-        match self
+        // `Relaxed` is enough on the CAS itself: no data is published through
+        // the word (RMWs read the latest value regardless of ordering), and
+        // all cross-location ordering comes from the fence below.
+        let announced = match self
             .word()
-            .compare_exchange(FREE, who, Ordering::SeqCst, Ordering::Relaxed)
+            .compare_exchange(FREE, who, Ordering::Relaxed, Ordering::Relaxed)
         {
             Ok(_) => true,
             Err(current) => current == who,
-        }
+        };
+        // Order the announce store before the caller's recheck loads:
+        // store-then-load on different locations is only ordered through a
+        // fence. Pairs with the fence in `wake`/`wake_all`; see module docs.
+        fence(Ordering::SeqCst);
+        announced
     }
 
     /// Parks the thread while the futex word still reads `who` (Dekker step 3).
@@ -85,7 +103,10 @@ impl Futex {
     #[inline(always)]
     pub(crate) fn wake(self) {
         let word = self.word();
-        if word.load(Ordering::SeqCst) != FREE {
+        // Order the caller's index publish before the announce-word load.
+        // Pairs with the fence in `announce`; see the module docs.
+        fence(Ordering::SeqCst);
+        if word.load(Ordering::Relaxed) != FREE {
             word.store(FREE, Ordering::Relaxed);
             #[cfg(not(feature = "loom"))]
             atomic_wait::wake_one(word);
@@ -99,8 +120,10 @@ impl Futex {
     #[inline(always)]
     pub(crate) fn wake_all(self) {
         let word = self.word();
+        // Same fence pairing as `wake`; see the module docs.
+        fence(Ordering::SeqCst);
         if word.load(Ordering::Relaxed) != FREE {
-            word.store(FREE, Ordering::SeqCst);
+            word.store(FREE, Ordering::Relaxed);
             #[cfg(not(feature = "loom"))]
             atomic_wait::wake_all(word);
         }
