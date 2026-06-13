@@ -1,8 +1,6 @@
 use crate::{
-    atomic::Ordering,
-    queue::{Ownership, RefCounted},
     read_guard::BatchReader,
-    spsc::queue::QueuePtr,
+    ring::{Consumer, Ring},
 };
 
 #[cfg(feature = "async")]
@@ -28,18 +26,14 @@ use core::{
 /// assert_eq!(rx.recv(), 1);
 /// assert_eq!(rx.recv(), 2);
 /// ```
-pub struct Receiver<T, O: Ownership = RefCounted> {
-    pub ptr: QueuePtr<T, O>,
-    pub local_tail: usize,
-    pub local_head: usize,
+pub struct Receiver<T> {
+    consumer: Consumer<Ring<T>>,
 }
 
-impl<T, O: Ownership> Receiver<T, O> {
-    pub(crate) fn new(queue_ptr: QueuePtr<T, O>) -> Self {
+impl<T> Receiver<T> {
+    pub(crate) fn new(ring: Ring<T>) -> Self {
         Self {
-            ptr: queue_ptr,
-            local_tail: 0,
-            local_head: 0,
+            consumer: Consumer::attach(ring),
         }
     }
 
@@ -62,24 +56,12 @@ impl<T, O: Ownership> Receiver<T, O> {
     /// assert_eq!(rx.try_recv(), None);
     /// ```
     pub fn try_recv(&mut self) -> Option<T> {
-        if self.local_head == self.local_tail {
-            self.load_tail();
-            if self.local_head == self.local_tail {
-                return None;
-            }
-        }
-
-        // SAFETY: head != tail which means queue is not empty and head has valid initialised
-        //         value
-        let ret = unsafe { self.ptr.get(self.local_head) };
-        let new_head = self.local_head.wrapping_add(1);
-        self.store_head(new_head);
-        self.local_head = new_head;
+        let value = self.consumer.try_pop()?;
 
         #[cfg(feature = "async")]
-        self.ptr.wake_sender();
+        self.consumer.ring().wake_sender();
 
-        Some(ret)
+        Some(value)
     }
 
     /// Receives a value from the queue, blocking if necessary.
@@ -126,23 +108,20 @@ impl<T, O: Ownership> Receiver<T, O> {
     /// assert_eq!(rx.recv_with_spin_count(32), 42);
     /// ```
     pub fn recv_with_spin_count(&mut self, spin_count: u32) -> T {
+        // Spin until there is data, then move the value straight out of the ring.
+        // We don't route the value through `try_pop` here: its `Option<T>` would
+        // add a copy of the value on the hot path for large payloads.
         let mut backoff = crate::Backoff::with_spin_count(spin_count);
-        while self.local_head == self.local_tail {
+        while self.consumer.is_empty() {
             backoff.backoff();
-            self.load_tail();
+            self.consumer.refresh_tail();
         }
-
-        // SAFETY: head != tail which means queue is not empty and head has valid initialised
-        //         value
-        let ret = unsafe { self.ptr.get(self.local_head) };
-        let new_head = self.local_head.wrapping_add(1);
-        self.store_head(new_head);
-        self.local_head = new_head;
+        let value = self.consumer.pop();
 
         #[cfg(feature = "async")]
-        self.ptr.wake_sender();
+        self.consumer.ring().wake_sender();
 
-        ret
+        value
     }
 
     /// Returns a [`ReadGuard`](crate::read_guard::ReadGuard) that provides
@@ -199,55 +178,32 @@ impl<T, O: Ownership> Receiver<T, O> {
 
     #[cfg(feature = "async")]
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<T> {
-        if self.local_head == self.local_tail {
-            self.load_tail();
-            if self.local_head == self.local_tail {
-                self.ptr.register_receiver_waker(cx.waker());
+        if self.consumer.is_empty() {
+            self.consumer.refresh_tail();
+            if self.consumer.is_empty() {
+                self.consumer.ring().register_receiver_waker(cx.waker());
 
                 // prevent lost wake
-                self.local_tail = self.ptr.tail().load(Ordering::SeqCst);
-                if self.local_head == self.local_tail {
+                self.consumer.refresh_tail_seqcst();
+                if self.consumer.is_empty() {
                     return Poll::Pending;
                 }
             }
         }
 
-        // SAFETY: head != tail which means queue is not empty and head has valid initialised
-        //         value
-        let ret = unsafe { self.ptr.get(self.local_head) };
-        let new_head = self.local_head.wrapping_add(1);
-        self.store_head(new_head);
-        self.local_head = new_head;
-        self.ptr.wake_sender();
+        let value = self.consumer.pop();
+        self.consumer.ring().wake_sender();
 
-        Poll::Ready(ret)
-    }
-
-    #[inline(always)]
-    fn store_head(&self, value: usize) {
-        self.ptr.head().store(value, Ordering::Release);
-    }
-
-    #[inline(always)]
-    fn load_tail(&mut self) {
-        self.local_tail = self.ptr.tail().load(Ordering::Acquire);
-    }
-
-    #[inline(always)]
-    pub(crate) fn refresh_head(&mut self) {
-        self.local_head = self.ptr.head().load(Ordering::Acquire);
-        if self.local_tail < self.local_head {
-            self.local_tail = self.ptr.tail().load(Ordering::Acquire);
-        }
+        Poll::Ready(value)
     }
 }
 
-unsafe impl<T: Send, O: Ownership> Send for Receiver<T, O> {}
+unsafe impl<T: Send> Send for Receiver<T> {}
 
-impl<T, O: Ownership> Unpin for Receiver<T, O> {}
+impl<T> Unpin for Receiver<T> {}
 
 #[cfg(feature = "async")]
-impl<T, O: Ownership> futures::Stream for Receiver<T, O> {
+impl<T> futures::Stream for Receiver<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -261,7 +217,7 @@ impl<T, O: Ownership> futures::Stream for Receiver<T, O> {
 /// `read_buffer` refreshes the cached tail and returns a contiguous slice from
 /// the ring buffer.  `advance` publishes the new head via a `Release` store and
 /// wakes the sender when the `async` feature is enabled.
-unsafe impl<T, O: Ownership> BatchReader for Receiver<T, O> {
+unsafe impl<T> BatchReader for Receiver<T> {
     type Item = T;
 
     /// Returns a slice of the available read buffer in the queue.
@@ -299,21 +255,7 @@ unsafe impl<T, O: Ownership> BatchReader for Receiver<T, O> {
     /// ```
     #[inline]
     fn read_buffer(&mut self) -> &[T] {
-        let mut available = self.local_tail.wrapping_sub(self.local_head);
-
-        if available == 0 {
-            self.load_tail();
-            available = self.local_tail.wrapping_sub(self.local_head);
-        }
-
-        let start = self.local_head & self.ptr.mask;
-        let contiguous = self.ptr.capacity - start;
-        let len = available.min(contiguous);
-
-        unsafe {
-            let ptr = self.ptr.exact_at(start);
-            core::slice::from_raw_parts(ptr.as_ptr(), len)
-        }
+        self.consumer.read_buffer()
     }
 
     /// Advances the consumer head by `n` items.
@@ -349,22 +291,9 @@ unsafe impl<T, O: Ownership> BatchReader for Receiver<T, O> {
     /// ```
     #[inline(always)]
     unsafe fn advance(&mut self, n: usize) {
-        #[cfg(debug_assertions)]
-        {
-            let start = self.local_head & self.ptr.mask;
-            let contiguous = self.ptr.capacity - start;
-            let available = contiguous.min(self.local_tail.wrapping_sub(self.local_head));
-            assert!(
-                n <= available,
-                "advancing ({n}) more than available space ({available})"
-            );
-        }
-
-        let new_head = self.local_head.wrapping_add(n);
-        self.store_head(new_head);
-        self.local_head = new_head;
+        unsafe { self.consumer.advance(n) };
 
         #[cfg(feature = "async")]
-        self.ptr.wake_sender();
+        self.consumer.ring().wake_sender();
     }
 }

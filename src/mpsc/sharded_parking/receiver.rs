@@ -1,8 +1,8 @@
 use crate::{
     Backoff, Box,
-    atomic::Ordering,
     read_guard::BatchReader,
-    spsc::{self, parking_shards::ParkingShardsPtr},
+    ring::Consumer,
+    shard_table::{Cursor, Shard, ShardTable},
 };
 
 /// The receiving half of a sharded parking MPSC channel.
@@ -10,28 +10,15 @@ use crate::{
 /// The receiver polls all shards in round-robin fashion. After consuming items,
 /// it checks that shard's futex and wakes its parked sender, if any.
 pub struct Receiver<T> {
-    ptrs: Box<[spsc::ShardQueuePtr<T>]>,
-    local_heads: Box<[usize]>,
-    local_tails: Box<[usize]>,
-    max_shards: usize,
-    next_shard: usize,
-    shards: ParkingShardsPtr<T>,
+    consumers: Box<[Consumer<Shard<T>>]>,
+    cursor: Cursor,
 }
 
 impl<T> Receiver<T> {
-    pub(crate) fn new(shards: ParkingShardsPtr<T>, max_shards: usize) -> Self {
-        let mut ptrs = Box::new_uninit_slice(max_shards);
-        for i in 0..max_shards {
-            ptrs[i].write(shards.claim_consumer_queue_ptr(i).unwrap());
-        }
-
+    pub(crate) fn new(table: &ShardTable<T>) -> Self {
         Self {
-            ptrs: unsafe { ptrs.assume_init() },
-            local_heads: core::iter::repeat_n(0, max_shards).collect(),
-            local_tails: core::iter::repeat_n(0, max_shards).collect(),
-            max_shards,
-            next_shard: 0,
-            shards,
+            consumers: table.claim_all_consumers().map(Consumer::attach).collect(),
+            cursor: Cursor::new(table.len()),
         }
     }
 
@@ -50,124 +37,56 @@ impl<T> Receiver<T> {
     ///
     /// Returns `Some(value)` if a value was received, or `None` if all shards are empty.
     pub fn try_recv(&mut self) -> Option<T> {
-        let start = self.next_shard;
-        loop {
-            let shard = self.next_shard;
+        // Locate a non-empty shard in the scan, then pop outside it: a pop
+        // inside the closure would route the value through an extra `Option<T>`
+        // return — a copy of `T` on the hot path for large payloads.
+        let consumers = &mut self.consumers;
+        let shard_idx = self
+            .cursor
+            .find(|shard_idx| consumers[shard_idx].has_items().then_some(shard_idx))?;
 
-            if self.local_heads[shard] == self.local_tails[shard] {
-                self.load_tail(shard);
-            }
-
-            if self.local_heads[shard] != self.local_tails[shard] {
-                let ret = unsafe { self.ptrs[shard].get(self.local_heads[shard]) };
-                let new_head = self.local_heads[shard].wrapping_add(1);
-                self.store_head(shard, new_head);
-                self.local_heads[shard] = new_head;
-
-                self.wake_senders(shard);
-
-                return Some(ret);
-            }
-
-            self.next_shard += 1;
-            if self.next_shard == self.max_shards {
-                self.next_shard = 0;
-            }
-
-            if self.next_shard == start {
-                return None;
-            }
-        }
+        let consumer = &mut self.consumers[shard_idx];
+        let value = consumer.pop();
+        // the pop published the new head; wake this shard's parked sender, if
+        // any — see `Futex::wake` for the ordering reasoning
+        consumer.ring().futex().wake();
+        Some(value)
     }
 
     /// Returns a [`ReadGuard`](crate::read_guard::ReadGuard) for batch reading.
     pub fn read_guard(&mut self) -> crate::read_guard::ReadGuard<'_, Self> {
         crate::read_guard::ReadGuard::new(self)
     }
-
-    #[inline(always)]
-    fn store_head(&self, shard: usize, value: usize) {
-        self.ptrs[shard].head().store(value, Ordering::Release);
-    }
-
-    #[inline(always)]
-    fn load_tail(&mut self, shard: usize) {
-        self.local_tails[shard] = self.ptrs[shard].tail().load(Ordering::Acquire);
-    }
-
-    /// Dekker pattern: after store_head(Release), load futex with SeqCst.
-    /// If this shard's sender is parked, wake it.
-    #[inline(always)]
-    fn wake_senders(&self, shard: usize) {
-        let futex = self.shards.futex(shard);
-        if futex.load(Ordering::SeqCst) != 0 {
-            futex.store(0, Ordering::Relaxed);
-            atomic_wait::wake_one(futex);
-        }
-    }
 }
 
 /// # Safety
 ///
-/// The implementation delegates to per-shard SPSC QueuePtrs.
+/// The implementation delegates to the per-shard SPSC consumers.
 /// `read_buffer` polls shards round-robin and returns the first non-empty
-/// contiguous slice. `advance` publishes the new head and wakes parked senders.
+/// contiguous slice. `advance` publishes the new head on the active shard and
+/// wakes its parked sender, if any.
 unsafe impl<T> BatchReader for Receiver<T> {
     type Item = T;
 
     fn read_buffer(&mut self) -> &[T] {
-        let start = self.next_shard;
-        loop {
-            let shard = self.next_shard;
+        let consumers = &mut self.consumers;
+        let found = self.cursor.find(|shard_idx| {
+            let (ptr, len) = consumers[shard_idx].read_buffer_raw();
+            (len > 0).then_some((ptr, len))
+        });
 
-            let mut available = self.local_tails[shard].wrapping_sub(self.local_heads[shard]);
-            if available == 0 {
-                self.load_tail(shard);
-                available = self.local_tails[shard].wrapping_sub(self.local_heads[shard]);
-            }
-
-            if available > 0 {
-                let s = self.local_heads[shard] & self.ptrs[shard].mask;
-                let contiguous = self.ptrs[shard].capacity - s;
-                let len = available.min(contiguous);
-
-                return unsafe {
-                    let ptr = self.ptrs[shard].exact_at(s);
-                    core::slice::from_raw_parts(ptr.as_ptr(), len)
-                };
-            }
-
-            self.next_shard += 1;
-            if self.next_shard == self.max_shards {
-                self.next_shard = 0;
-            }
-
-            if self.next_shard == start {
-                return &[];
-            }
+        match found {
+            // SAFETY: raw parts of the found shard's ring, which `self` keeps
+            // alive; rebuilt here only so the slice outlives the scan closure.
+            Some((ptr, len)) => unsafe { core::slice::from_raw_parts(ptr.as_ptr(), len) },
+            None => &[],
         }
     }
 
     unsafe fn advance(&mut self, n: usize) {
-        let shard = self.next_shard;
-
-        #[cfg(debug_assertions)]
-        {
-            let s = self.local_heads[shard] & self.ptrs[shard].mask;
-            let contiguous = self.ptrs[shard].capacity - s;
-            let available =
-                contiguous.min(self.local_tails[shard].wrapping_sub(self.local_heads[shard]));
-            assert!(
-                n <= available,
-                "advancing ({n}) more than available space ({available})"
-            );
-        }
-
-        let new_head = self.local_heads[shard].wrapping_add(n);
-        self.store_head(shard, new_head);
-        self.local_heads[shard] = new_head;
-
-        self.wake_senders(shard);
+        let consumer = &mut self.consumers[self.cursor.index()];
+        unsafe { consumer.advance(n) };
+        consumer.ring().futex().wake();
     }
 }
 

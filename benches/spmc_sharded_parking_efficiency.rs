@@ -24,7 +24,7 @@ fn run_sustained(label: &str, size: NonZeroUsize, count: usize, receiver_count: 
 
     let mut handles = Vec::new();
     for receiver_id in 1..receiver_count {
-        let mut rx = rx.clone().unwrap();
+        let mut rx = rx.try_clone().unwrap();
         let items = support::work_items(count, receiver_id, receiver_count);
         handles.push(thread::spawn(move || {
             for _ in 0..items {
@@ -73,7 +73,7 @@ fn run_bursty(
 
     let mut handles = Vec::new();
     for receiver_id in 1..receiver_count {
-        let mut rx = rx.clone().unwrap();
+        let mut rx = rx.try_clone().unwrap();
         let total = bursts * support::work_items(burst_size, receiver_id, receiver_count);
         handles.push(thread::spawn(move || {
             for _ in 0..total {

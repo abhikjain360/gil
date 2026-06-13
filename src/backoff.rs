@@ -35,10 +35,7 @@
 ///     }
 /// }
 /// ```
-pub struct Backoff {
-    max_spin: u32,
-    spin_count: u32,
-}
+pub struct Backoff(ParkingBackoff);
 
 impl Backoff {
     /// Creates a new `Backoff` with the given spin count.
@@ -55,10 +52,9 @@ impl Backoff {
     /// ```
     #[inline(always)]
     pub fn with_spin_count(max_spin: u32) -> Self {
-        Self {
-            max_spin,
-            spin_count: 0,
-        }
+        // A `Backoff` is a `ParkingBackoff` whose yield budget never runs out:
+        // it cycles spin → yield forever instead of ever asking to park.
+        Self(ParkingBackoff::new(max_spin, u32::MAX))
     }
 
     /// Updates the spin count.
@@ -76,7 +72,7 @@ impl Backoff {
     /// ```
     #[inline(always)]
     pub fn set_spin_count(&mut self, max_spin: u32) {
-        self.max_spin = max_spin;
+        self.0.max_spin = max_spin;
     }
 
     /// Performs one backoff step.
@@ -98,11 +94,10 @@ impl Backoff {
     /// ```
     #[inline(always)]
     pub fn backoff(&mut self) {
-        if self.spin_count < self.max_spin {
-            crate::hint::spin_loop();
-            self.spin_count += 1;
-        } else {
-            self.spin_count = 0;
+        if self.0.backoff() {
+            // Only reachable after u32::MAX yields: restart the cycle so the
+            // spin → yield cadence continues forever.
+            self.0.reset();
             crate::thread::yield_now();
         }
     }
@@ -127,7 +122,7 @@ impl Backoff {
     /// ```
     #[inline(always)]
     pub fn reset(&mut self) {
-        self.spin_count = 0;
+        self.0.reset();
     }
 }
 

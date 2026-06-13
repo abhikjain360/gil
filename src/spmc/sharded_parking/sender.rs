@@ -2,8 +2,8 @@ use core::mem::MaybeUninit;
 
 use crate::{
     Backoff, Box,
-    atomic::Ordering,
-    spsc::{self, parking_shards::ParkingShardsPtr},
+    ring::Producer,
+    shard_table::{Cursor, Shard, ShardTable},
 };
 
 /// The sending half of a sharded parking SPMC channel.
@@ -11,28 +11,15 @@ use crate::{
 /// The sender writes to shards in strict round-robin fashion. After writing,
 /// it checks that shard's futex and wakes its parked receiver, if any.
 pub struct Sender<T> {
-    ptrs: Box<[spsc::ShardQueuePtr<T>]>,
-    local_heads: Box<[usize]>,
-    local_tails: Box<[usize]>,
-    max_shards: usize,
-    next_shard: usize,
-    shards: ParkingShardsPtr<T>,
+    producers: Box<[Producer<Shard<T>>]>,
+    cursor: Cursor,
 }
 
 impl<T> Sender<T> {
-    pub(crate) fn new(shards: ParkingShardsPtr<T>, max_shards: usize) -> Self {
-        let mut ptrs = Box::new_uninit_slice(max_shards);
-        for i in 0..max_shards {
-            ptrs[i].write(shards.claim_producer_queue_ptr(i).unwrap());
-        }
-
+    pub(crate) fn new(table: &ShardTable<T>) -> Self {
         Self {
-            ptrs: unsafe { ptrs.assume_init() },
-            local_heads: core::iter::repeat_n(0, max_shards).collect(),
-            local_tails: core::iter::repeat_n(0, max_shards).collect(),
-            max_shards,
-            next_shard: 0,
-            shards,
+            producers: table.claim_all_producers().map(Producer::attach).collect(),
+            cursor: Cursor::new(table.len()),
         }
     }
 
@@ -40,75 +27,37 @@ impl<T> Sender<T> {
     ///
     /// After writing, wakes any parked receivers.
     pub fn send(&mut self, value: T) {
-        let shard = self.next_shard;
+        let producer = &mut self.producers[self.cursor.index()];
 
         let mut backoff = Backoff::with_spin_count(128);
-        while self.is_full(shard) {
+        while producer.is_full() {
             backoff.backoff();
-            self.load_head(shard);
+            producer.refresh_head();
         }
+        producer.push(value);
+        // the push published the new tail; wake this shard's parked receiver, if
+        // any — see `Futex::wake` for the ordering reasoning
+        producer.ring().futex().wake();
 
-        let new_tail = self.local_tails[shard].wrapping_add(1);
-        unsafe { self.ptrs[shard].set(self.local_tails[shard], value) };
-        self.store_tail(shard, new_tail);
-        self.local_tails[shard] = new_tail;
-
-        self.wake_receivers(shard);
-
-        self.next_shard += 1;
-        if self.next_shard == self.max_shards {
-            self.next_shard = 0;
-        }
+        self.cursor.step();
     }
 
     /// Attempts to send to the next shard without blocking.
     ///
     /// Returns `Err(value)` if the current target shard is full.
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
-        let shard = self.next_shard;
+        let producer = &mut self.producers[self.cursor.index()];
 
-        if self.is_full(shard) {
-            self.load_head(shard);
-            if self.is_full(shard) {
-                return Err(value);
-            }
-        }
+        producer.try_push(value)?;
+        producer.ring().futex().wake();
 
-        let new_tail = self.local_tails[shard].wrapping_add(1);
-        unsafe { self.ptrs[shard].set(self.local_tails[shard], value) };
-        self.store_tail(shard, new_tail);
-        self.local_tails[shard] = new_tail;
-
-        self.wake_receivers(shard);
-
-        self.next_shard += 1;
-        if self.next_shard == self.max_shards {
-            self.next_shard = 0;
-        }
-
+        self.cursor.step();
         Ok(())
     }
 
     /// Returns a mutable slice of the write buffer for the current shard.
     pub fn write_buffer(&mut self) -> &mut [MaybeUninit<T>] {
-        let shard = self.next_shard;
-        let mut available =
-            self.ptrs[shard].size - self.local_tails[shard].wrapping_sub(self.local_heads[shard]);
-
-        if available == 0 {
-            self.load_head(shard);
-            available = self.ptrs[shard].size
-                - self.local_tails[shard].wrapping_sub(self.local_heads[shard]);
-        }
-
-        let start = self.local_tails[shard] & self.ptrs[shard].mask;
-        let contiguous = self.ptrs[shard].capacity - start;
-        let len = available.min(contiguous);
-
-        unsafe {
-            let ptr = self.ptrs[shard].exact_at(start).cast();
-            core::slice::from_raw_parts_mut(ptr.as_ptr(), len)
-        }
+        self.producers[self.cursor.index()].write_buffer()
     }
 
     /// Commits `len` elements and wakes any parked receivers.
@@ -117,57 +66,12 @@ impl<T> Sender<T> {
     ///
     /// The caller must ensure that at least `len` elements have been initialized.
     pub unsafe fn commit(&mut self, len: usize) {
-        let shard = self.next_shard;
+        let producer = &mut self.producers[self.cursor.index()];
 
-        #[cfg(debug_assertions)]
-        {
-            let start = self.local_tails[shard] & self.ptrs[shard].mask;
-            let contiguous = self.ptrs[shard].capacity - start;
-            let available = contiguous.min(
-                self.ptrs[shard].size
-                    - self.local_tails[shard].wrapping_sub(self.local_heads[shard]),
-            );
-            assert!(
-                len <= available,
-                "advancing ({len}) more than available space ({available})"
-            );
-        }
+        unsafe { producer.commit(len) };
+        producer.ring().futex().wake();
 
-        let new_tail = self.local_tails[shard].wrapping_add(len);
-        self.store_tail(shard, new_tail);
-        self.local_tails[shard] = new_tail;
-
-        self.wake_receivers(shard);
-
-        self.next_shard += 1;
-        if self.next_shard == self.max_shards {
-            self.next_shard = 0;
-        }
-    }
-
-    /// Dekker pattern: after store_tail(Release), load futex with SeqCst.
-    #[inline(always)]
-    fn wake_receivers(&self, shard: usize) {
-        let futex = self.shards.futex(shard);
-        if futex.load(Ordering::SeqCst) != 0 {
-            futex.store(0, Ordering::Relaxed);
-            atomic_wait::wake_one(futex);
-        }
-    }
-
-    #[inline(always)]
-    fn is_full(&self, shard: usize) -> bool {
-        self.local_tails[shard].wrapping_sub(self.local_heads[shard]) >= self.ptrs[shard].size
-    }
-
-    #[inline(always)]
-    fn store_tail(&self, shard: usize, value: usize) {
-        self.ptrs[shard].tail().store(value, Ordering::Release);
-    }
-
-    #[inline(always)]
-    fn load_head(&mut self, shard: usize) {
-        self.local_heads[shard] = self.ptrs[shard].head().load(Ordering::Acquire);
+        self.cursor.step();
     }
 }
 

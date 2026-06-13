@@ -18,7 +18,7 @@
 //!     NonZeroUsize::new(256).unwrap(),
 //! );
 //!
-//! let mut tx2 = tx.clone().expect("shard available");
+//! let mut tx2 = tx.try_clone().expect("shard available");
 //! let h = thread::spawn(move || tx2.send(1));
 //!
 //! tx.send(2);
@@ -31,7 +31,7 @@
 
 use core::num::NonZeroUsize;
 
-use crate::spsc::parking_shards::ParkingShardsPtr;
+use crate::shard_table::ShardTable;
 
 mod receiver;
 mod sender;
@@ -43,7 +43,7 @@ pub use sender::Sender;
 ///
 /// # Arguments
 ///
-/// * `max_shards` - The maximum number of shards (must be a power of two).
+/// * `max_shards` - The maximum number of shards.
 /// * `capacity_per_shard` - The capacity of each individual shard.
 ///
 /// # Returns
@@ -53,18 +53,10 @@ pub fn channel<T>(
     max_shards: NonZeroUsize,
     capacity_per_shard: NonZeroUsize,
 ) -> (Sender<T>, Receiver<T>) {
-    debug_assert!(
-        max_shards.is_power_of_two(),
-        "number of shards must be a power of 2"
-    );
+    let table = ShardTable::new(max_shards, capacity_per_shard);
 
-    let shards = ParkingShardsPtr::new(max_shards, capacity_per_shard);
-
-    // The receiver owns the consumer side of every shard. Claim those slots
-    // before creating the first sender so producer ownership is the only
-    // fallible slot acquisition left for sender cloning/reuse.
-    let receiver = Receiver::new(shards.clone(), max_shards.get());
-    let sender = Sender::new(shards, max_shards);
+    let receiver = Receiver::new(&table);
+    let sender = Sender::new(table);
 
     (sender, receiver)
 }
@@ -88,7 +80,7 @@ mod test {
 
         thread::scope(move |scope| {
             for thread_id in 0..THREADS - 1 {
-                let mut tx = tx.clone().unwrap();
+                let mut tx = tx.try_clone().unwrap();
                 scope.spawn(move || {
                     for i in 0..ITER {
                         tx.send((thread_id, i));
@@ -114,18 +106,18 @@ mod test {
     }
 
     #[test]
-    fn sender_clone_reuses_dropped_shard() {
+    fn sender_try_clone_reuses_dropped_shard() {
         let (tx0, mut rx) =
             channel::<usize>(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(4).unwrap());
-        let mut tx1 = tx0.clone().unwrap();
+        let mut tx1 = tx0.try_clone().unwrap();
 
         tx1.send(1);
         assert_eq!(rx.recv(), 1);
 
         drop(tx0);
 
-        let mut tx2 = tx1.clone().unwrap();
-        assert!(tx1.clone().is_none());
+        let mut tx2 = tx1.try_clone().unwrap();
+        assert!(tx1.try_clone().is_none());
 
         tx2.try_send(2).unwrap();
         assert_eq!(rx.try_recv(), Some(2));
@@ -199,7 +191,7 @@ mod test {
 
         thread::scope(|scope| {
             for thread_id in 0..SHARDS - 1 {
-                let mut tx = tx.clone().unwrap();
+                let mut tx = tx.try_clone().unwrap();
                 scope.spawn(move || {
                     let mut sent = 0;
                     while sent < TOTAL_ITEMS_PER_THREAD {
@@ -283,7 +275,7 @@ mod test {
             let mut senders = Vec::new();
             senders.push(tx0);
             for shard in 1..SHARDS {
-                let tx = senders[shard - 1].clone().unwrap();
+                let tx = senders[shard - 1].try_clone().unwrap();
                 senders.push(tx);
             }
 

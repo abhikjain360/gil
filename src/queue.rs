@@ -93,17 +93,18 @@ pub(crate) struct Queue<H, T, O: Ownership = RefCounted> {
     ownership: O::State,
 }
 
-pub trait DropInitItems<H, T, I> {
-    #[expect(clippy::missing_safety_doc)]
-    unsafe fn drop_init_items(
-        head: NonNull<H>,
-        tail: NonNull<T>,
-        capacity: usize,
-        at: impl Fn(usize) -> NonNull<I>,
-    );
+/// Teardown policy: drops the in-flight items (sent but not yet received) when
+/// the last handle to a queue goes away.
+pub trait DropInFlight<H, T, I> {
+    /// # Safety
+    ///
+    /// Must only be called once, on teardown, when no endpoint can touch the
+    /// buffer anymore. `at` must return valid (possibly uninitialised) slots for
+    /// any index.
+    unsafe fn drop_in_flight(head: &H, tail: &T, capacity: usize, at: impl Fn(usize) -> NonNull<I>);
 }
 
-pub struct QueuePtr<H, T, I, G: DropInitItems<H, T, I>, O: Ownership = RefCounted> {
+pub struct QueuePtr<H, T, I, G: DropInFlight<H, T, I>, O: Ownership = RefCounted> {
     pub(crate) ptr: NonNull<Queue<H, T, O>>,
     pub(crate) buffer: NonNull<I>,
     pub(crate) size: usize,
@@ -113,7 +114,7 @@ pub struct QueuePtr<H, T, I, G: DropInitItems<H, T, I>, O: Ownership = RefCounte
     _marker: PhantomData<G>,
 }
 
-impl<H, T, I, G: DropInitItems<H, T, I>> Clone for QueuePtr<H, T, I, G, RefCounted> {
+impl<H, T, I, G: DropInFlight<H, T, I>> Clone for QueuePtr<H, T, I, G, RefCounted> {
     fn clone(&self) -> Self {
         self.try_clone_as(()).unwrap()
     }
@@ -123,7 +124,7 @@ impl<H, T, I, G, O> QueuePtr<H, T, I, G, O>
 where
     H: Default,
     T: Default,
-    G: DropInitItems<H, T, I>,
+    G: DropInFlight<H, T, I>,
     O: Ownership,
 {
     pub(crate) fn with_size(size: NonZeroUsize) -> Self {
@@ -174,12 +175,21 @@ pub(crate) trait Initializer {
 
 impl<H, T, I, G, O> QueuePtr<H, T, I, G, O>
 where
-    G: DropInitItems<H, T, I>,
+    G: DropInFlight<H, T, I>,
     O: Ownership,
 {
+    /// Shared reference to the queue header.
+    ///
+    /// Sound because the header is initialised at allocation, outlives every
+    /// handle, and all of its fields are interior-mutable (atomics/wakers).
+    #[inline(always)]
+    pub(crate) fn header(&self) -> &Queue<H, T, O> {
+        unsafe { self.ptr.as_ref() }
+    }
+
     #[inline(always)]
     fn ownership(&self) -> &O::State {
-        unsafe { _field!(Queue<H, T, O>, self.ptr, ownership, O::State).as_ref() }
+        &self.header().ownership
     }
 
     pub(crate) fn try_clone_as(&self, owner: O::Handle) -> Option<Self> {
@@ -224,35 +234,19 @@ where
     pub(crate) fn at(&self, index: usize) -> NonNull<I> {
         unsafe { self.exact_at(index & self.mask) }
     }
-
-    #[inline(always)]
-    pub(crate) unsafe fn get(&self, index: usize) -> I {
-        unsafe { self.at(index & self.mask).read() }
-    }
-
-    #[inline(always)]
-    pub(crate) unsafe fn set(&self, index: usize, value: I) {
-        unsafe { self.at(index & self.mask).write(value) }
-    }
 }
 
 impl<H, T, I, G, O> Drop for QueuePtr<H, T, I, G, O>
 where
-    G: DropInitItems<H, T, I>,
+    G: DropInFlight<H, T, I>,
     O: Ownership,
 {
     fn drop(&mut self) {
         if O::release(self.ownership(), self.owner) {
             let (layout, _) = Self::layout(self.capacity);
 
-            unsafe {
-                G::drop_init_items(
-                    _field!(Queue<H, T, O>, self.ptr, head, H),
-                    _field!(Queue<H, T, O>, self.ptr, tail, T),
-                    self.capacity,
-                    |i| self.at(i),
-                )
-            };
+            let header = self.header();
+            unsafe { G::drop_in_flight(&header.head, &header.tail, self.capacity, |i| self.at(i)) };
 
             unsafe {
                 self.ptr.drop_in_place();

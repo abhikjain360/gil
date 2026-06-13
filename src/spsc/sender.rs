@@ -1,10 +1,6 @@
 use core::mem::MaybeUninit;
 
-use crate::{
-    atomic::Ordering,
-    queue::{Ownership, RefCounted},
-    spsc::queue::QueuePtr,
-};
+use crate::ring::{Producer, Ring};
 
 /// The producer end of the SPSC queue.
 ///
@@ -23,29 +19,14 @@ use crate::{
 /// assert_eq!(rx.recv(), 1);
 /// assert_eq!(rx.recv(), 2);
 /// ```
-pub struct Sender<T, O: Ownership = RefCounted> {
-    ptr: QueuePtr<T, O>,
-    local_head: usize,
-    local_tail: usize,
+pub struct Sender<T> {
+    producer: Producer<Ring<T>>,
 }
 
-impl<T, O: Ownership> Sender<T, O> {
-    pub(crate) fn new(queue_ptr: QueuePtr<T, O>) -> Self {
+impl<T> Sender<T> {
+    pub(crate) fn new(ring: Ring<T>) -> Self {
         Self {
-            ptr: queue_ptr,
-            local_head: 0,
-            local_tail: 0,
-        }
-    }
-
-    pub(crate) fn from_current(queue_ptr: QueuePtr<T, O>) -> Self {
-        let local_head = queue_ptr.head().load(Ordering::Acquire);
-        let local_tail = queue_ptr.tail().load(Ordering::Acquire);
-
-        Self {
-            ptr: queue_ptr,
-            local_head,
-            local_tail,
+            producer: Producer::attach(ring),
         }
     }
 
@@ -73,20 +54,10 @@ impl<T, O: Ownership> Sender<T, O> {
     /// assert!(tx.try_send(3).is_ok());
     /// ```
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
-        if self.is_full() {
-            self.load_head();
-            if self.is_full() {
-                return Err(value);
-            }
-        }
-
-        let new_tail = self.local_tail.wrapping_add(1);
-        unsafe { self.ptr.set(self.local_tail, value) };
-        self.store_tail(new_tail);
-        self.local_tail = new_tail;
+        self.producer.try_push(value)?;
 
         #[cfg(feature = "async")]
-        self.ptr.wake_receiver();
+        self.producer.ring().wake_receiver();
 
         Ok(())
     }
@@ -135,19 +106,18 @@ impl<T, O: Ownership> Sender<T, O> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn send_with_spin_count(&mut self, value: T, spin_count: u32) {
+        // Spin until there is space, then move the value straight into the ring.
+        // We don't route the value through `try_push` here: its `Result<(), T>`
+        // would add a copy of `value` on the hot path for large payloads.
         let mut backoff = crate::Backoff::with_spin_count(spin_count);
-        while self.is_full() {
+        while self.producer.is_full() {
             backoff.backoff();
-            self.load_head();
+            self.producer.refresh_head();
         }
-
-        let new_tail = self.local_tail.wrapping_add(1);
-        unsafe { self.ptr.set(self.local_tail, value) };
-        self.store_tail(new_tail);
-        self.local_tail = new_tail;
+        self.producer.push(value);
 
         #[cfg(feature = "async")]
-        self.ptr.wake_receiver();
+        self.producer.ring().wake_receiver();
     }
 
     /// Sends a value into the queue asynchronously.
@@ -171,15 +141,15 @@ impl<T, O: Ownership> Sender<T, O> {
     pub async fn send_async(&mut self, value: T) {
         use core::task::Poll;
 
-        if self.is_full() {
+        if self.producer.is_full() {
             futures::future::poll_fn(|ctx| {
-                self.load_head();
-                if self.is_full() {
-                    self.ptr.register_sender_waker(ctx.waker());
+                self.producer.refresh_head();
+                if self.producer.is_full() {
+                    self.producer.ring().register_sender_waker(ctx.waker());
 
                     // prevent lost wake
-                    self.local_head = self.ptr.head().load(Ordering::SeqCst);
-                    if self.is_full() {
+                    self.producer.refresh_head_seqcst();
+                    if self.producer.is_full() {
                         return Poll::Pending;
                     }
                 }
@@ -188,12 +158,8 @@ impl<T, O: Ownership> Sender<T, O> {
             .await;
         }
 
-        let new_tail = self.local_tail.wrapping_add(1);
-        unsafe { self.ptr.set(self.local_tail, value) };
-        self.store_tail(new_tail);
-        self.local_tail = new_tail;
-
-        self.ptr.wake_receiver();
+        self.producer.push(value);
+        self.producer.ring().wake_receiver();
     }
 
     /// Returns a mutable slice to the available write buffer in the queue.
@@ -234,21 +200,7 @@ impl<T, O: Ownership> Sender<T, O> {
     /// }
     /// ```
     pub fn write_buffer(&mut self) -> &mut [MaybeUninit<T>] {
-        let mut available = self.ptr.size - self.local_tail.wrapping_sub(self.local_head);
-
-        if available == 0 {
-            self.load_head();
-            available = self.ptr.size - self.local_tail.wrapping_sub(self.local_head);
-        }
-
-        let start = self.local_tail & self.ptr.mask;
-        let contiguous = self.ptr.capacity - start;
-        let len = available.min(contiguous);
-
-        unsafe {
-            let ptr = self.ptr.exact_at(start).cast();
-            core::slice::from_raw_parts_mut(ptr.as_ptr(), len)
-        }
+        self.producer.write_buffer()
     }
 
     /// Commits items written to the buffer obtained via [`write_buffer`](Sender::write_buffer).
@@ -279,41 +231,11 @@ impl<T, O: Ownership> Sender<T, O> {
     /// ```
     #[inline(always)]
     pub unsafe fn commit(&mut self, len: usize) {
-        #[cfg(debug_assertions)]
-        {
-            let start = self.local_tail & self.ptr.mask;
-            let contiguous = self.ptr.capacity - start;
-            let available =
-                contiguous.min(self.ptr.size - self.local_tail.wrapping_sub(self.local_head));
-            assert!(
-                len <= available,
-                "advancing ({len}) more than available space ({available})"
-            );
-        }
-
-        // the len can be just right at the edge of buffer, so we need to wrap just in case
-        let new_tail = self.local_tail.wrapping_add(len);
-        self.store_tail(new_tail);
-        self.local_tail = new_tail;
+        unsafe { self.producer.commit(len) };
 
         #[cfg(feature = "async")]
-        self.ptr.wake_receiver();
-    }
-
-    #[inline(always)]
-    fn is_full(&self) -> bool {
-        self.local_tail.wrapping_sub(self.local_head) >= self.ptr.size
-    }
-
-    #[inline(always)]
-    fn store_tail(&self, value: usize) {
-        self.ptr.tail().store(value, Ordering::Release);
-    }
-
-    #[inline(always)]
-    fn load_head(&mut self) {
-        self.local_head = self.ptr.head().load(Ordering::Acquire);
+        self.producer.ring().wake_receiver();
     }
 }
 
-unsafe impl<T: Send, O: Ownership> Send for Sender<T, O> {}
+unsafe impl<T: Send> Send for Sender<T> {}

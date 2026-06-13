@@ -14,7 +14,7 @@ fn main() {
     let start = SystemTime::now();
 
     for _ in 0..SENDERS - 1 {
-        let mut tx = tx.clone().expect("too many senders for max_shards");
+        let mut tx = tx.try_clone().expect("too many senders for max_shards");
         spawn(move || {
             for i in 0..MESSAGES {
                 tx.send(black_box(i));

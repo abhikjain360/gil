@@ -1,7 +1,7 @@
 use core::cmp::Ordering as Cmp;
 
 #[cfg(feature = "std")]
-use crate::mpmc::queue::FutexState;
+use crate::futex::SENDER_WAITING;
 use crate::{atomic::Ordering, mpmc::queue::QueuePtr};
 
 /// The producer end of the MPMC queue.
@@ -85,11 +85,11 @@ impl<T> Sender<T> {
             if let Err(ret) = self.try_send(value) {
                 value = ret;
                 #[cfg(feature = "std")]
-                if backoff.backoff() && self.ptr.prepare_wait(FutexState::SendersWaiting) {
+                if backoff.backoff() && self.ptr.futex().announce(SENDER_WAITING) {
                     // catch lost wakes
                     if let Err(ret) = self.try_send(value) {
                         value = ret;
-                        self.ptr.wait(FutexState::SendersWaiting);
+                        self.ptr.futex().sleep(SENDER_WAITING);
                     } else {
                         return;
                     }
@@ -166,7 +166,7 @@ impl<T> Sender<T> {
         cell.epoch().store(self.local_tail, Ordering::Release);
 
         #[cfg(feature = "std")]
-        self.ptr.wake();
+        self.ptr.futex().wake_all();
 
         Ok(())
     }

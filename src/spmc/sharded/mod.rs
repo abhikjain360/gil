@@ -16,7 +16,7 @@
 //!     NonZeroUsize::new(256).unwrap(),
 //! );
 //!
-//! let mut rx2 = rx.clone().expect("shard available");
+//! let mut rx2 = rx.try_clone().expect("shard available");
 //!
 //! tx.send(1);
 //! tx.send(2);
@@ -29,7 +29,7 @@
 
 use core::num::NonZeroUsize;
 
-use crate::spsc::shards::ShardsPtr;
+use crate::shard_table::ShardTable;
 
 mod receiver;
 mod sender;
@@ -41,23 +41,18 @@ pub use sender::Sender;
 ///
 /// # Arguments
 ///
-/// * `max_shards` - The maximum number of shards (must be a power of two).
+/// * `max_shards` - The maximum number of shards.
 /// * `capacity_per_shard` - The capacity of each individual shard.
 pub fn channel<T>(
     max_shards: NonZeroUsize,
     capacity_per_shard: NonZeroUsize,
 ) -> (Sender<T>, Receiver<T>) {
-    debug_assert!(
-        max_shards.is_power_of_two(),
-        "number of shards must be a power of 2"
-    );
+    let table = ShardTable::new(max_shards, capacity_per_shard);
 
-    let shards = ShardsPtr::new(max_shards, capacity_per_shard);
+    let sender = Sender::new(&table);
+    let receiver = Receiver::new(table);
 
-    (
-        Sender::new(shards.clone(), max_shards.get()),
-        Receiver::new(shards, max_shards),
-    )
+    (sender, receiver)
 }
 
 #[cfg(all(test, not(feature = "loom")))]
@@ -78,17 +73,17 @@ mod test {
 
         thread::scope(move |scope| {
             for _ in 0..THREADS - 1 {
-                let mut rx = rx.clone().unwrap();
+                let mut rx = rx.try_clone().unwrap();
                 scope.spawn(move || {
                     for _ in 0..ITER {
-                        let _ = rx.recv();
+                        _ = rx.recv();
                     }
                 });
             }
             let mut rx = rx;
             scope.spawn(move || {
                 for _ in 0..ITER {
-                    let _ = rx.recv();
+                    _ = rx.recv();
                 }
             });
 
@@ -100,10 +95,10 @@ mod test {
     }
 
     #[test]
-    fn receiver_clone_reuses_dropped_shard() {
+    fn receiver_try_clone_reuses_dropped_shard() {
         let (mut tx, mut rx0) =
             channel::<usize>(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(4).unwrap());
-        let mut rx1 = rx0.clone().unwrap();
+        let mut rx1 = rx0.try_clone().unwrap();
 
         tx.send(0);
         tx.send(1);
@@ -112,8 +107,8 @@ mod test {
 
         drop(rx0);
 
-        let mut rx2 = rx1.clone().unwrap();
-        assert!(rx1.clone().is_none());
+        let mut rx2 = rx1.try_clone().unwrap();
+        assert!(rx1.try_clone().is_none());
 
         tx.send(2);
         assert_eq!(rx2.try_recv(), Some(2));
@@ -210,9 +205,9 @@ mod test {
             NonZeroUsize::new(64).unwrap(),
         );
 
-        let mut rx2 = rx.clone().unwrap();
+        let mut rx2 = rx.try_clone().unwrap();
         // Third clone should fail (only 2 shards)
-        assert!(rx.clone().is_none());
+        assert!(rx.try_clone().is_none());
 
         let mut rx = rx;
 

@@ -58,7 +58,6 @@ use core::num::NonZeroUsize;
 
 pub use self::{receiver::Receiver, sender::Sender};
 
-mod queue;
 mod receiver;
 mod sender;
 
@@ -68,7 +67,10 @@ mod sender;
 ///
 /// # Arguments
 ///
-/// * `capacity` - The capacity of the queue.
+/// * `capacity` - The exact number of items the queue can hold. Unlike the MPSC/MPMC/SPMC
+///   families (whose usable capacity is rounded up to the next power of two), the SPSC queue
+///   holds *exactly* `capacity` items; only the backing buffer is rounded up to a power of two
+///   internally.
 ///
 /// # Returns
 ///
@@ -83,7 +85,7 @@ mod sender;
 /// let (tx, rx) = channel::<usize>(NonZeroUsize::new(1024).unwrap());
 /// ```
 pub fn channel<T>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
-    let queue = queue::QueuePtr::with_size(capacity);
+    let queue = super::queue::QueuePtr::with_size(capacity);
     (Sender::new(queue.clone()), Receiver::new(queue))
 }
 

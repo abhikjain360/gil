@@ -1,19 +1,43 @@
-use core::{cell::UnsafeCell, ptr::NonNull};
+use core::cell::UnsafeCell;
 
 use crate::{
-    Backoff, Box,
+    Arc, Backoff, Box,
     padded::Padded,
-    queue::ShardOwnership,
     read_guard::BatchReader,
-    spsc::{self, shards::ShardsPtr},
+    ring::Consumer,
+    shard_table::{Cursor, Shard, ShardTable},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 struct Shared<T> {
-    receivers: Box<[UnsafeCell<spsc::Receiver<T, ShardOwnership>>]>,
+    consumers: Box<[UnsafeCell<Consumer<Shard<T>>>]>,
     locks: Box<[Padded<AtomicBool>]>,
+    /// Live receiver count; only bounds `try_clone` at one receiver per shard —
+    /// the `Arc` holding this struct owns the memory.
     alive_receivers: AtomicUsize,
-    max_shards: usize,
+}
+
+impl<T> Shared<T> {
+    #[inline(always)]
+    fn max_shards(&self) -> usize {
+        self.consumers.len()
+    }
+
+    #[inline(always)]
+    fn try_lock(&self, shard_idx: usize) -> bool {
+        self.locks[shard_idx]
+            .value
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// # Safety
+    /// Only call this if `try_lock` returned `true` earlier, and this is the only `unlock` after
+    /// that.
+    #[inline(always)]
+    unsafe fn unlock(&self, shard_idx: usize) {
+        self.locks[shard_idx].value.store(false, Ordering::Release);
+    }
 }
 
 /// The receiving half of a sharded MPMC channel.
@@ -38,32 +62,27 @@ struct Shared<T> {
 /// assert_eq!(rx.recv(), 2);
 /// ```
 pub struct Receiver<T> {
-    shared: NonNull<Shared<T>>,
-    next_shard: usize,
+    shared: Arc<Shared<T>>,
+    cursor: Cursor,
 }
 
 impl<T> Receiver<T> {
-    pub(super) fn new(shards: ShardsPtr<T>, max_shards: usize) -> Self {
-        let mut locks = Box::<[Padded<AtomicBool>]>::new_uninit_slice(max_shards);
-        let mut receivers = Box::new_uninit_slice(max_shards);
-
-        for i in 0..max_shards {
-            let shard = shards.claim_consumer_queue_ptr(i).unwrap();
-            receivers[i].write(UnsafeCell::new(spsc::Receiver::new(shard)));
-
-            locks[i].write(Padded::new(AtomicBool::new(false)));
-        }
-
-        let shared = Box::new(Shared {
-            receivers: unsafe { receivers.assume_init() },
-            locks: unsafe { locks.assume_init() },
-            alive_receivers: AtomicUsize::new(1),
-            max_shards,
-        });
+    pub(super) fn new(table: &ShardTable<T>) -> Self {
+        let consumers = table
+            .claim_all_consumers()
+            .map(|shard| UnsafeCell::new(Consumer::attach(shard)))
+            .collect();
+        let locks = (0..table.len())
+            .map(|_| Padded::new(AtomicBool::new(false)))
+            .collect();
 
         Self {
-            shared: unsafe { NonNull::new_unchecked(Box::into_raw(shared)) },
-            next_shard: 0,
+            shared: Arc::new(Shared {
+                consumers,
+                locks,
+                alive_receivers: AtomicUsize::new(1),
+            }),
+            cursor: Cursor::new(table.len()),
         }
     }
 
@@ -86,10 +105,10 @@ impl<T> Receiver<T> {
     /// let rx2 = rx.try_clone().expect("slot available");
     /// ```
     pub fn try_clone(&self) -> Option<Self> {
-        let shared = self.shared();
+        let shared = &self.shared;
         let mut live = shared.alive_receivers.load(Ordering::Acquire);
         loop {
-            if live >= shared.max_shards {
+            if live >= shared.max_shards() {
                 return None;
             }
 
@@ -108,8 +127,8 @@ impl<T> Receiver<T> {
         }
 
         Some(Self {
-            shared: self.shared,
-            next_shard: 0,
+            shared: Arc::clone(&self.shared),
+            cursor: Cursor::new(self.shared.max_shards()),
         })
     }
 
@@ -189,30 +208,37 @@ impl<T> Receiver<T> {
     /// assert_eq!(rx.try_recv(), Some(42));
     /// ```
     pub fn try_recv(&mut self) -> Option<T> {
-        let start = self.next_shard;
-        loop {
-            let idx = self.next_shard;
-
-            if self.try_lock(idx) {
-                let receiver = unsafe { self.receiver_mut(idx) };
-                receiver.refresh_head();
-                let ret = receiver.try_recv();
-                unsafe { self.unlock(idx) };
-
-                if let Some(v) = ret {
-                    return Some(v);
-                }
-            }
-
-            self.next_shard += 1;
-            if self.next_shard == self.shared().max_shards {
-                self.next_shard = 0;
-            }
-
-            if self.next_shard == start {
+        // Locate a non-empty shard in the scan (keeping its lock), then pop
+        // outside it: a pop inside the closure would route the value through an
+        // extra `Option<T>` return — a copy of `T` on the hot path for large
+        // payloads.
+        let shared = &*self.shared;
+        let shard_idx = self.cursor.find(|shard_idx| {
+            if !shared.try_lock(shard_idx) {
                 return None;
             }
-        }
+
+            // SAFETY: we hold this shard's lock.
+            let consumer = unsafe { &mut *shared.consumers[shard_idx].get() };
+            // a peer may have advanced the head since we last held this shard
+            consumer.resync();
+            if !consumer.has_items() {
+                // SAFETY: locked above; single unlock.
+                unsafe { shared.unlock(shard_idx) };
+                return None;
+            }
+
+            // still locked — the pop below is exclusive
+            Some(shard_idx)
+        })?;
+
+        // SAFETY: the scan left this shard locked for us.
+        let consumer = unsafe { &mut *shared.consumers[shard_idx].get() };
+        let value = consumer.pop();
+        // SAFETY: locked in the scan; single unlock.
+        unsafe { shared.unlock(shard_idx) };
+
+        Some(value)
     }
 
     /// Returns a [`ReadGuard`](crate::read_guard::ReadGuard) providing read
@@ -246,39 +272,6 @@ impl<T> Receiver<T> {
     /// ```
     pub fn read_guard(&mut self) -> crate::read_guard::ReadGuard<'_, Self> {
         crate::read_guard::ReadGuard::new(self)
-    }
-
-    #[inline(always)]
-    fn shared(&self) -> &Shared<T> {
-        unsafe { self.shared.as_ref() }
-    }
-
-    /// # Safety
-    ///
-    /// The caller must hold this shard's lock.
-    #[inline(always)]
-    unsafe fn receiver_mut(&mut self, shard: usize) -> &mut spsc::Receiver<T, ShardOwnership> {
-        unsafe { &mut *self.shared().receivers[shard].get() }
-    }
-
-    #[inline(always)]
-    fn shard_lock(&self, shard: usize) -> &AtomicBool {
-        &self.shared().locks[shard].value
-    }
-
-    #[inline(always)]
-    fn try_lock(&self, shard: usize) -> bool {
-        self.shard_lock(shard)
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    }
-
-    /// # Safety
-    /// Only call this if `try_lock` returned `true` earlier, and this is the only `unlock` after
-    /// that.
-    #[inline(always)]
-    unsafe fn unlock(&self, shard: usize) {
-        self.shard_lock(shard).store(false, Ordering::Release);
     }
 }
 
@@ -331,36 +324,38 @@ unsafe impl<T> BatchReader for Receiver<T> {
     /// assert_eq!(rx.try_recv(), None);
     /// ```
     fn read_buffer(&mut self) -> &[T] {
-        let start = self.next_shard;
-        loop {
-            let idx = self.next_shard;
-
-            if self.try_lock(idx) {
-                let receiver = unsafe { self.receiver_mut(idx) };
-                receiver.refresh_head();
-                let ret = receiver.read_buffer();
-
-                if !ret.is_empty() {
-                    return unsafe { core::mem::transmute::<&[T], &[T]>(ret) };
-                } else {
-                    unsafe { self.unlock(idx) };
-                }
+        let shared = &*self.shared;
+        let found = self.cursor.find(|shard_idx| {
+            if !shared.try_lock(shard_idx) {
+                return None;
             }
 
-            self.next_shard += 1;
-            if self.next_shard == self.shared().max_shards {
-                self.next_shard = 0;
+            // SAFETY: we hold this shard's lock.
+            let consumer = unsafe { &mut *shared.consumers[shard_idx].get() };
+            consumer.resync();
+            let (ptr, len) = consumer.read_buffer_raw();
+            if len == 0 {
+                // SAFETY: locked above; single unlock.
+                unsafe { shared.unlock(shard_idx) };
+                return None;
             }
 
-            if self.next_shard == start {
-                return &[];
-            }
+            // keep the lock; `release` (via ReadGuard drop) unlocks
+            Some((ptr, len))
+        });
+
+        match found {
+            // SAFETY: raw parts of the locked shard's ring, which `self` keeps
+            // alive; rebuilt here only so the slice outlives the scan closure.
+            Some((ptr, len)) => unsafe { core::slice::from_raw_parts(ptr.as_ptr(), len) },
+            None => &[],
         }
     }
 
     unsafe fn advance(&mut self, n: usize) {
-        let receiver = unsafe { self.receiver_mut(self.next_shard) };
-        unsafe { receiver.advance(n) };
+        // SAFETY (deref): `read_buffer` left this shard locked for us.
+        let consumer = unsafe { &mut *self.shared.consumers[self.cursor.index()].get() };
+        unsafe { consumer.advance(n) };
     }
 
     /// Releases the shard spinlock acquired by
@@ -371,17 +366,14 @@ unsafe impl<T> BatchReader for Receiver<T> {
     /// Must only be called after [`read_buffer`](BatchReader::read_buffer)
     /// returned a **non-empty** slice (i.e., a lock is held).
     unsafe fn release(&mut self) {
-        unsafe { self.unlock(self.next_shard) };
+        unsafe { self.shared.unlock(self.cursor.index()) };
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        unsafe {
-            if self.shared().alive_receivers.fetch_sub(1, Ordering::AcqRel) == 1 {
-                _ = Box::from_raw(self.shared.as_ptr());
-            }
-        }
+        // the Arc owns the memory; this only maintains the clone-bound count
+        self.shared.alive_receivers.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

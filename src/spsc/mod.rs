@@ -74,15 +74,11 @@
 
 use core::num::NonZeroUsize;
 
-pub(crate) use self::queue::ShardQueuePtr;
-#[cfg(feature = "std")]
-pub(crate) mod parking_shards;
-pub(crate) mod shards;
 pub use self::{receiver::Receiver, sender::Sender};
 
 #[cfg(feature = "std")]
 pub mod parking;
-mod queue;
+pub(crate) mod queue;
 mod receiver;
 mod sender;
 
@@ -92,7 +88,10 @@ mod sender;
 ///
 /// # Arguments
 ///
-/// * `capacity` - The capacity of the queue.
+/// * `capacity` - The exact number of items the queue can hold. Unlike the MPSC/MPMC/SPMC
+///   families (whose usable capacity is rounded up to the next power of two), the SPSC queue
+///   holds *exactly* `capacity` items; only the backing buffer is rounded up to a power of two
+///   internally.
 ///
 /// # Returns
 ///

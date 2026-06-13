@@ -37,7 +37,9 @@
 //!   opposite of MPSC. Clone receivers to distribute to multiple consumer threads.
 //! - **No Async:** Unlike SPSC, this queue does not have async support.
 //! - **No Batch Operations:** This queue does not support batch operations.
-//! - **Capacity Rounding:** The actual capacity is rounded up to the next power of two.
+//! - **Capacity Rounding:** The usable capacity is rounded up to the next power of two
+//!   (e.g. requesting 1000 yields a queue that holds 1024 items). This differs from the SPSC
+//!   queue, which holds exactly the requested capacity.
 //!
 //! # Reference
 //!
@@ -76,7 +78,7 @@ pub mod sharded_parking;
 /// ```
 pub fn channel<T>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let queue = queue::QueuePtr::with_size(capacity);
-    queue.initialize::<queue::Initializer<T>>();
+    queue.initialize::<crate::cell::CellInit<T>>();
 
     (Sender::new(queue.clone()), Receiver::new(queue))
 }

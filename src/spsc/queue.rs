@@ -1,3 +1,15 @@
+//! Ring layouts for the SPSC family.
+//!
+//! Two header layouts share the one ring algorithm in [`crate::ring`]:
+//!
+//! * [`Head`]/[`Tail`] — the full SPSC layout, used by both the spin and parking
+//!   SPSC queues. Carries the futex word under `std` and the async wakers under
+//!   `async`. Spin-only users pay one untouched cache line for the futex; that
+//!   cost is memory only, never on the hot path.
+//! * [`ShardHead`]/[`ShardTail`] — the shard layout used by the sharded channels.
+//!   Shards have no async API, so this layout carries only what shards use: the
+//!   indices and (under `std`) the futex the parking variants park on.
+
 use core::ptr::NonNull;
 #[cfg(feature = "async")]
 use core::task::Waker;
@@ -5,16 +17,21 @@ use core::task::Waker;
 #[cfg(feature = "async")]
 use futures::task::AtomicWaker;
 
+#[cfg(feature = "std")]
+use crate::{atomic::AtomicU32, futex::HasFutex};
 use crate::{
     atomic::{AtomicUsize, Ordering},
     padded::Padded,
-    queue::{Ownership, RefCounted, ShardOwnership},
+    queue::ShardOwnership,
+    ring::{RingHead, RingTail},
 };
 
 #[derive(Default)]
 #[repr(C)]
 pub struct Head {
     head: Padded<AtomicUsize>,
+    #[cfg(feature = "std")]
+    futex: Padded<AtomicU32>,
     #[cfg(feature = "async")]
     receiver_waker: Padded<AtomicWaker>,
 }
@@ -27,28 +44,81 @@ pub struct Tail {
     sender_waker: Padded<AtomicWaker>,
 }
 
-pub struct GetInit;
+#[derive(Default)]
+#[repr(C)]
+pub struct ShardHead {
+    head: Padded<AtomicUsize>,
+    #[cfg(feature = "std")]
+    futex: Padded<AtomicU32>,
+}
 
-impl<T> crate::DropInitItems<Head, Tail, T> for GetInit {
-    unsafe fn drop_init_items(
-        head: NonNull<Head>,
-        tail: NonNull<Tail>,
-        _capaity: usize,
-        at: impl Fn(usize) -> NonNull<T>,
+#[derive(Default)]
+#[repr(C)]
+pub struct ShardTail {
+    tail: Padded<AtomicUsize>,
+}
+
+impl RingHead for Head {
+    #[inline(always)]
+    fn head(&self) -> &AtomicUsize {
+        &self.head.value
+    }
+}
+
+impl RingTail for Tail {
+    #[inline(always)]
+    fn tail(&self) -> &AtomicUsize {
+        &self.tail.value
+    }
+}
+
+impl RingHead for ShardHead {
+    #[inline(always)]
+    fn head(&self) -> &AtomicUsize {
+        &self.head.value
+    }
+}
+
+impl RingTail for ShardTail {
+    #[inline(always)]
+    fn tail(&self) -> &AtomicUsize {
+        &self.tail.value
+    }
+}
+
+#[cfg(feature = "std")]
+impl HasFutex for Head {
+    #[inline(always)]
+    fn futex(&self) -> &AtomicU32 {
+        &self.futex.value
+    }
+}
+
+#[cfg(feature = "std")]
+impl HasFutex for ShardHead {
+    #[inline(always)]
+    fn futex(&self) -> &AtomicU32 {
+        &self.futex.value
+    }
+}
+
+/// Drops the in-flight items of a ring (the `head..tail` window) on teardown.
+/// One impl serves every layout whose header implements [`RingHead`]/[`RingTail`].
+pub struct DropWindow;
+
+impl<H: RingHead, T: RingTail, I> crate::DropInFlight<H, T, I> for DropWindow {
+    unsafe fn drop_in_flight(
+        head: &H,
+        tail: &T,
+        _capacity: usize,
+        at: impl Fn(usize) -> NonNull<I>,
     ) {
-        if !core::mem::needs_drop::<T>() {
+        if !core::mem::needs_drop::<I>() {
             return;
         }
 
-        let (head, tail) = unsafe {
-            let head = _field!(Head, head, head.value, AtomicUsize)
-                .as_ref()
-                .load(Ordering::Relaxed);
-            let tail = _field!(Tail, tail, tail.value, AtomicUsize)
-                .as_ref()
-                .load(Ordering::Relaxed);
-            (head, tail)
-        };
+        let head = head.head().load(Ordering::Relaxed);
+        let tail = tail.tail().load(Ordering::Relaxed);
         let len = tail.wrapping_sub(head);
 
         for i in 0..len {
@@ -58,67 +128,29 @@ impl<T> crate::DropInitItems<Head, Tail, T> for GetInit {
     }
 }
 
-pub(crate) type QueuePtr<T, O = RefCounted> = crate::QueuePtr<Head, Tail, T, GetInit, O>;
-pub(crate) type ShardQueuePtr<T> = QueuePtr<T, ShardOwnership>;
-type Queue<O = RefCounted> = crate::Queue<Head, Tail, O>;
-
-impl<T, O: Ownership> QueuePtr<T, O> {
-    #[inline(always)]
-    pub fn head(&self) -> &AtomicUsize {
-        unsafe { _field!(Queue<O>, self.ptr, head.head.value, AtomicUsize).as_ref() }
-    }
-
-    #[inline(always)]
-    pub fn tail(&self) -> &AtomicUsize {
-        unsafe { _field!(Queue<O>, self.ptr, tail.tail.value, AtomicUsize).as_ref() }
-    }
-}
-
-impl<T> ShardQueuePtr<T> {
-    pub(crate) fn try_claim_producer(&self) -> Option<Self> {
-        self.try_clone_as(ShardOwnership::PRODUCER)
-    }
-
-    pub(crate) fn try_claim_consumer(&self) -> Option<Self> {
-        self.try_clone_as(ShardOwnership::CONSUMER)
-    }
-}
+pub(crate) type QueuePtr<T> = crate::QueuePtr<Head, Tail, T, DropWindow>;
+/// One shard of a sharded channel: an SPSC ring with role-claimed ownership.
+pub(crate) type Shard<T> = crate::QueuePtr<ShardHead, ShardTail, T, DropWindow, ShardOwnership>;
 
 #[cfg(feature = "async")]
-impl<T, O: Ownership> QueuePtr<T, O> {
+impl<T> QueuePtr<T> {
     #[inline(always)]
     pub fn register_sender_waker(&self, waker: &Waker) {
-        unsafe {
-            _field!(Queue<O>, self.ptr, tail.sender_waker.value, AtomicWaker)
-                .as_ref()
-                .register(waker);
-        }
+        self.header().tail.sender_waker.value.register(waker);
     }
 
     #[inline(always)]
     pub fn register_receiver_waker(&self, waker: &Waker) {
-        unsafe {
-            _field!(Queue<O>, self.ptr, head.receiver_waker.value, AtomicWaker)
-                .as_ref()
-                .register(waker);
-        }
+        self.header().head.receiver_waker.value.register(waker);
     }
 
     #[inline(always)]
     pub(crate) fn wake_sender(&self) {
-        unsafe {
-            _field!(Queue<O>, self.ptr, tail.sender_waker.value, AtomicWaker)
-                .as_ref()
-                .wake();
-        }
+        self.header().tail.sender_waker.value.wake();
     }
 
     #[inline(always)]
     pub(crate) fn wake_receiver(&self) {
-        unsafe {
-            _field!(Queue<O>, self.ptr, head.receiver_waker.value, AtomicWaker)
-                .as_ref()
-                .wake();
-        }
+        self.header().head.receiver_waker.value.wake();
     }
 }

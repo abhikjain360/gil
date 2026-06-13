@@ -47,7 +47,6 @@
 //!
 //! - **Fallible Clone:** `Sender::try_clone()` and `Receiver::try_clone()` return `Option`. They return
 //!   `None` if all shards are already occupied. Always handle this case in production code.
-//! - **Power of Two:** `max_shards` must be a power of two.
 //! - **ReadGuard Locking:** `Receiver::read_guard()` returns a [`ReadGuard`](crate::read_guard::ReadGuard)
 //!   that holds an internal shard lock. The lock is released when the guard is dropped. Holding the
 //!   guard for too long will block other receivers from accessing that shard.
@@ -58,7 +57,7 @@ use core::num::NonZeroUsize;
 
 mod receiver;
 mod sender;
-use crate::spsc::shards::ShardsPtr;
+use crate::shard_table::ShardTable;
 
 pub use receiver::Receiver;
 pub use sender::Sender;
@@ -69,7 +68,7 @@ pub use sender::Sender;
 ///
 /// # Arguments
 ///
-/// * `max_shards` - The maximum number of shards to create. This must be a power of two.
+/// * `max_shards` - The maximum number of shards to create.
 /// * `capacity_per_shard` - The capacity of each individual shard.
 ///
 /// # Returns
@@ -91,16 +90,10 @@ pub fn channel<T>(
     max_shards: NonZeroUsize,
     capacity_per_shard: NonZeroUsize,
 ) -> (sender::Sender<T>, receiver::Receiver<T>) {
-    debug_assert_ne!(max_shards.get(), 0, "number of shards must be > 0");
-    debug_assert!(
-        max_shards.is_power_of_two(),
-        "number of shards must be a power of 2"
-    );
+    let table = ShardTable::new(max_shards, capacity_per_shard);
 
-    let shards = ShardsPtr::new(max_shards, capacity_per_shard);
-
-    let receiver = receiver::Receiver::new(shards.clone(), max_shards.get());
-    let sender = sender::Sender::new(shards, max_shards);
+    let receiver = receiver::Receiver::new(&table);
+    let sender = sender::Sender::new(table);
 
     (sender, receiver)
 }

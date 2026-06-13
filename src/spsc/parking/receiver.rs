@@ -1,7 +1,7 @@
 use crate::{
-    atomic::Ordering,
+    futex::RECEIVER_WAITING,
     read_guard::BatchReader,
-    spsc::parking::queue::{FutexState, QueuePtr},
+    ring::{Consumer, Ring},
 };
 
 /// The consumer end of the parking SPSC queue.
@@ -22,27 +22,13 @@ use crate::{
 /// assert_eq!(rx.recv(), 2);
 /// ```
 pub struct Receiver<T> {
-    ptr: QueuePtr<T>,
-    local_tail: usize,
-    local_head: usize,
+    consumer: Consumer<Ring<T>>,
 }
 
 impl<T> Receiver<T> {
-    pub(crate) fn new(queue_ptr: QueuePtr<T>) -> Self {
+    pub(crate) fn new(ring: Ring<T>) -> Self {
         Self {
-            ptr: queue_ptr,
-            local_tail: 0,
-            local_head: 0,
-        }
-    }
-
-    #[expect(dead_code)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.local_head == self.local_tail && {
-            // relaxed load is enough as we are only checking for emptiness hint
-            // to avoid expensive locking in sharded implementation
-            let tail = self.ptr.tail().load(Ordering::Relaxed);
-            self.local_head == tail
+            consumer: Consumer::attach(ring),
         }
     }
 
@@ -65,23 +51,9 @@ impl<T> Receiver<T> {
     /// assert_eq!(rx.try_recv(), None);
     /// ```
     pub fn try_recv(&mut self) -> Option<T> {
-        if self.local_head == self.local_tail {
-            self.load_tail();
-            if self.local_head == self.local_tail {
-                return None;
-            }
-        }
-
-        // SAFETY: head != tail which means queue is not empty and head has valid initialised
-        //         value
-        let ret = unsafe { self.ptr.get(self.local_head) };
-        let new_head = self.local_head.wrapping_add(1);
-        self.store_head(new_head);
-        self.local_head = new_head;
-
-        self.ptr.futex_wake();
-
-        Some(ret)
+        let value = self.consumer.try_pop()?;
+        self.consumer.ring().futex().wake();
+        Some(value)
     }
 
     /// Receives a value from the queue, blocking if necessary.
@@ -102,28 +74,28 @@ impl<T> Receiver<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn recv(&mut self) -> T {
+        // Wait for data, then move the value straight out of the ring. We don't
+        // route the value through `try_pop` here: its `Option<T>` would add a
+        // copy of the value on the hot path for large payloads.
         let mut backoff = crate::ParkingBackoff::new(16, 4);
-        while self.local_head == self.local_tail {
-            if backoff.backoff() && self.ptr.futex_store(FutexState::ReceiverWaiting) {
-                // catch lost unparks first before trying to park self
-                self.load_tail();
-                if self.local_head == self.local_tail {
-                    self.ptr.futex_wait(FutexState::ReceiverWaiting);
+        while self.consumer.is_empty() {
+            if backoff.backoff() {
+                let futex = self.consumer.ring().futex();
+                if futex.announce(RECEIVER_WAITING) {
+                    // catch lost wakes: recheck against a fresh tail before parking
+                    self.consumer.refresh_tail();
+                    if self.consumer.is_empty() {
+                        futex.sleep(RECEIVER_WAITING);
+                    }
                 }
-            };
-            self.load_tail();
+            }
+            self.consumer.refresh_tail();
         }
+        let value = self.consumer.pop();
 
-        // SAFETY: head != tail which means queue is not empty and head has valid initialised
-        //         value
-        let ret = unsafe { self.ptr.get(self.local_head) };
-        let new_head = self.local_head.wrapping_add(1);
-        self.store_head(new_head);
-        self.local_head = new_head;
+        self.consumer.ring().futex().wake();
 
-        self.ptr.futex_wake();
-
-        ret
+        value
     }
 
     /// Returns a [`ReadGuard`](crate::read_guard::ReadGuard) that provides
@@ -154,35 +126,6 @@ impl<T> Receiver<T> {
     /// ```
     pub fn read_guard(&mut self) -> crate::read_guard::ReadGuard<'_, Self> {
         crate::read_guard::ReadGuard::new(self)
-    }
-
-    #[inline(always)]
-    fn store_head(&self, value: usize) {
-        self.ptr.head().store(value, Ordering::Release);
-    }
-
-    #[inline(always)]
-    fn load_tail(&mut self) {
-        self.local_tail = self.ptr.tail().load(Ordering::Acquire);
-    }
-
-    #[expect(dead_code)]
-    #[inline(always)]
-    pub(crate) fn refresh_head(&mut self) {
-        self.local_head = self.ptr.head().load(Ordering::Acquire);
-        if self.local_tail < self.local_head {
-            self.local_tail = self.ptr.tail().load(Ordering::Acquire);
-        }
-    }
-
-    #[expect(dead_code)]
-    #[inline(always)]
-    pub(crate) unsafe fn clone_via_ptr(&self) -> Self {
-        Self {
-            ptr: self.ptr.clone(),
-            local_tail: self.local_tail,
-            local_head: self.local_head,
-        }
     }
 }
 
@@ -232,21 +175,7 @@ unsafe impl<T> BatchReader for Receiver<T> {
     /// ```
     #[inline]
     fn read_buffer(&mut self) -> &[T] {
-        let mut available = self.local_tail.wrapping_sub(self.local_head);
-
-        if available == 0 {
-            self.load_tail();
-            available = self.local_tail.wrapping_sub(self.local_head);
-        }
-
-        let start = self.local_head & self.ptr.mask;
-        let contiguous = self.ptr.capacity - start;
-        let len = available.min(contiguous);
-
-        unsafe {
-            let ptr = self.ptr.exact_at(start);
-            core::slice::from_raw_parts(ptr.as_ptr(), len)
-        }
+        self.consumer.read_buffer()
     }
 
     /// Advances the consumer head by `n` items.
@@ -282,21 +211,7 @@ unsafe impl<T> BatchReader for Receiver<T> {
     /// ```
     #[inline(always)]
     unsafe fn advance(&mut self, n: usize) {
-        #[cfg(debug_assertions)]
-        {
-            let start = self.local_head & self.ptr.mask;
-            let contiguous = self.ptr.capacity - start;
-            let available = contiguous.min(self.local_tail.wrapping_sub(self.local_head));
-            assert!(
-                n <= available,
-                "advancing ({n}) more than available space ({available})"
-            );
-        }
-
-        let new_head = self.local_head.wrapping_add(n);
-        self.store_head(new_head);
-        self.local_head = new_head;
-
-        self.ptr.futex_wake();
+        unsafe { self.consumer.advance(n) };
+        self.consumer.ring().futex().wake();
     }
 }

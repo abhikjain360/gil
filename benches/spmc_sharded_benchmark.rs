@@ -55,7 +55,7 @@ fn benchmark(c: &mut Criterion) {
                         let barrier = Arc::new(Barrier::new(receiver_count + 1));
                         let mut handles = Vec::with_capacity(receiver_count);
                         for receiver_id in 1..receiver_count {
-                            let mut rx_clone = rx.clone().unwrap();
+                            let mut rx_clone = rx.try_clone().unwrap();
                             let barrier_clone = Arc::clone(&barrier);
                             let messages = support::work_items(iter, receiver_id, receiver_count);
                             handles.push(spawn(move || {
@@ -106,7 +106,7 @@ fn benchmark(c: &mut Criterion) {
                         let barrier = Arc::new(Barrier::new(receiver_count + 1));
                         let mut handles = Vec::with_capacity(receiver_count);
                         for receiver_id in 1..receiver_count {
-                            let mut rx_clone = rx.clone().unwrap();
+                            let mut rx_clone = rx.try_clone().unwrap();
                             let barrier_clone = Arc::clone(&barrier);
                             let messages = support::work_items(iter, receiver_id, receiver_count);
                             handles.push(spawn(move || {
@@ -159,7 +159,7 @@ fn benchmark(c: &mut Criterion) {
                         let barrier = Arc::new(Barrier::new(receiver_count + 1));
                         let mut handles = Vec::with_capacity(receiver_count);
                         for receiver_id in 1..receiver_count {
-                            let mut rx_clone = rx.clone().unwrap();
+                            let mut rx_clone = rx.try_clone().unwrap();
                             let barrier_clone = Arc::clone(&barrier);
                             let messages = support::work_items(iter, receiver_id, receiver_count);
                             handles.push(spawn(move || {
@@ -224,7 +224,7 @@ fn benchmark(c: &mut Criterion) {
 
                             let mut handles = Vec::with_capacity(receiver_count);
                             for _ in 0..receiver_count - 1 {
-                                let mut rx_clone = rx.clone().unwrap();
+                                let mut rx_clone = rx.try_clone().unwrap();
                                 handles.push(spawn(move || {
                                     for _ in 0..messages_per_receiver {
                                         black_box(rx_clone.recv());
@@ -261,7 +261,7 @@ fn benchmark(c: &mut Criterion) {
 
                             let mut handles = Vec::with_capacity(receiver_count);
                             for _ in 0..receiver_count - 1 {
-                                let mut rx_clone = rx.clone().unwrap();
+                                let mut rx_clone = rx.try_clone().unwrap();
                                 handles.push(spawn(move || {
                                     let mut received = 0;
                                     while received < messages_per_receiver {
@@ -348,7 +348,7 @@ fn benchmark(c: &mut Criterion) {
 
                             let mut handles = Vec::with_capacity(receiver_count);
                             for _ in 0..receiver_count - 1 {
-                                let mut rx_clone = rx.clone().unwrap();
+                                let mut rx_clone = rx.try_clone().unwrap();
                                 handles.push(spawn(move || {
                                     for _ in 0..messages_per_receiver {
                                         black_box(rx_clone.recv());
@@ -387,7 +387,7 @@ fn benchmark(c: &mut Criterion) {
 
                             let mut handles = Vec::with_capacity(receiver_count);
                             for _ in 0..receiver_count - 1 {
-                                let mut rx_clone = rx.clone().unwrap();
+                                let mut rx_clone = rx.try_clone().unwrap();
                                 handles.push(spawn(move || {
                                     let mut received = 0;
                                     while received < messages_per_receiver {

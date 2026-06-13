@@ -11,14 +11,14 @@ fn main() {
 
         let t = thread::spawn(move || {
             for i in 0..100 {
-                let _x = rx1.recv();
+                _ = rx1.recv();
                 tx2.send(i as u8);
             }
         });
 
         for i in 0..100 {
             tx1.send(i as u8);
-            let _x = rx2.recv();
+            _ = rx2.recv();
         }
         t.join().unwrap();
         if attempt % 100 == 0 {

@@ -17,7 +17,7 @@
 //! );
 //!
 //! // Each clone binds to a different shard
-//! let mut tx2 = tx.clone().expect("shard available");
+//! let mut tx2 = tx.try_clone().expect("shard available");
 //! let h = thread::spawn(move || tx2.send(1));
 //!
 //! tx.send(2);
@@ -45,15 +45,14 @@
 //!
 //! # Gotchas
 //!
-//! - **Fallible Clone:** `Sender::clone()` returns `Option<Sender>`. It returns `None` if all shards
+//! - **Fallible Clone:** `Sender::try_clone()` returns `Option<Sender>`. It returns `None` if all shards
 //!   are already occupied. Always handle this case in production code.
-//! - **Power of Two:** `max_shards` must be a power of two.
 //! - **Batch Operations:** This variant supports batch operations via `write_buffer`/`commit` and
 //!   `read_buffer`/`advance`.
 
 use core::num::NonZeroUsize;
 
-use crate::spsc::shards::ShardsPtr;
+use crate::shard_table::ShardTable;
 
 mod receiver;
 mod sender;
@@ -67,7 +66,7 @@ pub use sender::Sender;
 ///
 /// # Arguments
 ///
-/// * `max_shards` - The maximum number of shards to create. This must be a power of two.
+/// * `max_shards` - The maximum number of shards to create.
 /// * `capacity_per_shard` - The capacity of each individual shard.
 ///
 /// # Returns
@@ -89,17 +88,10 @@ pub fn channel<T>(
     max_shards: NonZeroUsize,
     capacity_per_shard: NonZeroUsize,
 ) -> (sender::Sender<T>, receiver::Receiver<T>) {
-    debug_assert_ne!(max_shards.get(), 0, "number of shards must be > 0");
-    debug_assert!(
-        max_shards.is_power_of_two(),
-        "number of shards must be a power of 2"
-    );
+    let table = ShardTable::new(max_shards, capacity_per_shard);
 
-    let shards = ShardsPtr::new(max_shards, capacity_per_shard);
-
-    // initializing receiver first so that sender creation does not panic because of incorrect rc count
-    let receiver = receiver::Receiver::new(shards.clone(), max_shards.get());
-    let sender = sender::Sender::new(shards, max_shards);
+    let receiver = receiver::Receiver::new(&table);
+    let sender = sender::Sender::new(table);
 
     (sender, receiver)
 }
@@ -123,7 +115,7 @@ mod test {
 
         thread::scope(move |scope| {
             for thread_id in 0..THREADS - 1 {
-                let mut tx = tx.clone().unwrap();
+                let mut tx = tx.try_clone().unwrap();
                 scope.spawn(move || {
                     for i in 0..ITER {
                         tx.send((thread_id, i));
@@ -149,18 +141,18 @@ mod test {
     }
 
     #[test]
-    fn sender_clone_reuses_dropped_shard() {
+    fn sender_try_clone_reuses_dropped_shard() {
         let (tx0, mut rx) =
             channel::<usize>(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(4).unwrap());
-        let mut tx1 = tx0.clone().unwrap();
+        let mut tx1 = tx0.try_clone().unwrap();
 
         tx1.send(1);
         assert_eq!(rx.recv(), 1);
 
         drop(tx0);
 
-        let mut tx2 = tx1.clone().unwrap();
-        assert!(tx1.clone().is_none());
+        let mut tx2 = tx1.try_clone().unwrap();
+        assert!(tx1.try_clone().is_none());
 
         tx2.try_send(2).unwrap();
         assert_eq!(rx.try_recv(), Some(2));
@@ -234,7 +226,7 @@ mod test {
 
         thread::scope(|scope| {
             for thread_id in 0..SHARDS - 1 {
-                let mut tx = tx.clone().unwrap();
+                let mut tx = tx.try_clone().unwrap();
                 scope.spawn(move || {
                     let mut sent = 0;
                     while sent < TOTAL_ITEMS_PER_THREAD {

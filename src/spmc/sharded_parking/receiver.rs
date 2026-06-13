@@ -1,28 +1,24 @@
-use core::{num::NonZeroUsize, ptr::NonNull};
-
 use crate::{
-    atomic::{AtomicU32, Ordering},
+    futex::RECEIVER_WAITING,
     read_guard::BatchReader,
-    spsc::{self, parking_shards::ParkingShardsPtr},
+    ring::Consumer,
+    shard_table::{Shard, ShardTable},
 };
 
 /// The receiving half of a sharded parking SPMC channel.
 ///
 /// Each receiver is bound to a specific shard. When the shard is empty, the
-/// receiver parks on its shard's futex and is woken by the sender after writing.
+/// receiver parks on the futex embedded in that shard's header and is woken by
+/// the sender after writing.
 pub struct Receiver<T> {
-    ptr: spsc::ShardQueuePtr<T>,
-    local_head: usize,
-    local_tail: usize,
-    futex: NonNull<AtomicU32>,
-    shards: ParkingShardsPtr<T>,
-    max_shards: usize,
-    shard: usize,
+    consumer: Consumer<Shard<T>>,
+    table: ShardTable<T>,
+    shard_idx: usize,
 }
 
 impl<T> Receiver<T> {
-    pub(crate) fn new(shards: ParkingShardsPtr<T>, max_shards: NonZeroUsize) -> Self {
-        Self::init(shards, max_shards.get(), 0).unwrap()
+    pub(crate) fn new(table: ShardTable<T>) -> Self {
+        Self::init(table, 0).unwrap()
     }
 
     /// Attempts to clone the receiver.
@@ -32,36 +28,17 @@ impl<T> Receiver<T> {
     ///
     /// This scans the shard table and may touch up to `max_shards` atomics. Prefer
     /// creating long-lived receivers instead of cloning and dropping in a hot path.
-    #[expect(clippy::should_implement_trait)]
-    pub fn clone(&self) -> Option<Self> {
-        Self::init(
-            self.shards.clone(),
-            self.max_shards,
-            self.shard.wrapping_add(1),
-        )
+    pub fn try_clone(&self) -> Option<Self> {
+        Self::init(self.table.clone(), self.shard_idx.wrapping_add(1))
     }
 
-    fn init(shards: ParkingShardsPtr<T>, max_shards: usize, start_shard: usize) -> Option<Self> {
-        for offset in 0..max_shards {
-            let shard = start_shard.wrapping_add(offset) % max_shards;
-            if let Some(shard_ptr) = shards.claim_consumer_queue_ptr(shard) {
-                let local_head = shard_ptr.head().load(Ordering::Acquire);
-                let local_tail = shard_ptr.tail().load(Ordering::Acquire);
-                let futex = NonNull::from(shards.futex(shard));
-
-                return Some(Self {
-                    ptr: shard_ptr,
-                    local_head,
-                    local_tail,
-                    futex,
-                    shards,
-                    max_shards,
-                    shard,
-                });
-            }
-        }
-
-        None
+    fn init(table: ShardTable<T>, start: usize) -> Option<Self> {
+        let (shard_idx, shard) = table.claim_consumer(start)?;
+        Some(Self {
+            consumer: Consumer::attach(shard),
+            table,
+            shard_idx,
+        })
     }
 
     /// Receives a value, parking if the shard is empty.
@@ -70,62 +47,30 @@ impl<T> Receiver<T> {
     /// The sender wakes parked receivers after writing.
     pub fn recv(&mut self) -> T {
         let mut backoff = crate::ParkingBackoff::new(16, 4);
-        while self.local_head == self.local_tail {
+        while self.consumer.is_empty() {
             if backoff.backoff() {
-                // Announce intent to park (Dekker pattern)
-                self.futex().store(1, Ordering::SeqCst);
-                // Recheck after announcing
-                self.load_tail();
-                if self.local_head == self.local_tail {
-                    atomic_wait::wait(self.futex(), 1);
+                let futex = self.consumer.ring().futex();
+                if futex.announce(RECEIVER_WAITING) {
+                    // catch lost wakes: recheck against a fresh tail before parking
+                    self.consumer.refresh_tail();
+                    if self.consumer.is_empty() {
+                        futex.sleep(RECEIVER_WAITING);
+                    }
                 }
             }
-            self.load_tail();
+            self.consumer.refresh_tail();
         }
-
-        let ret = unsafe { self.ptr.get(self.local_head) };
-        let new_head = self.local_head.wrapping_add(1);
-        self.store_head(new_head);
-        self.local_head = new_head;
-
-        ret
+        self.consumer.pop()
     }
 
     /// Attempts to receive without blocking.
     pub fn try_recv(&mut self) -> Option<T> {
-        if self.local_head == self.local_tail {
-            self.load_tail();
-            if self.local_head == self.local_tail {
-                return None;
-            }
-        }
-
-        let ret = unsafe { self.ptr.get(self.local_head) };
-        let new_head = self.local_head.wrapping_add(1);
-        self.store_head(new_head);
-        self.local_head = new_head;
-
-        Some(ret)
+        self.consumer.try_pop()
     }
 
     /// Returns a [`ReadGuard`](crate::read_guard::ReadGuard) for batch reading.
     pub fn read_guard(&mut self) -> crate::read_guard::ReadGuard<'_, Self> {
         crate::read_guard::ReadGuard::new(self)
-    }
-
-    #[inline(always)]
-    fn futex(&self) -> &AtomicU32 {
-        unsafe { self.futex.as_ref() }
-    }
-
-    #[inline(always)]
-    fn store_head(&self, value: usize) {
-        self.ptr.head().store(value, Ordering::Release);
-    }
-
-    #[inline(always)]
-    fn load_tail(&mut self) {
-        self.local_tail = self.ptr.tail().load(Ordering::Acquire);
     }
 }
 
@@ -133,43 +78,16 @@ unsafe impl<T: Send> Send for Receiver<T> {}
 
 /// # Safety
 ///
-/// The implementation delegates to the single shard's SPSC QueuePtr.
+/// The implementation delegates to this receiver's single shard consumer.
 unsafe impl<T> BatchReader for Receiver<T> {
     type Item = T;
 
     fn read_buffer(&mut self) -> &[T] {
-        let mut available = self.local_tail.wrapping_sub(self.local_head);
-
-        if available == 0 {
-            self.load_tail();
-            available = self.local_tail.wrapping_sub(self.local_head);
-        }
-
-        let start = self.local_head & self.ptr.mask;
-        let contiguous = self.ptr.capacity - start;
-        let len = available.min(contiguous);
-
-        unsafe {
-            let ptr = self.ptr.exact_at(start);
-            core::slice::from_raw_parts(ptr.as_ptr(), len)
-        }
+        self.consumer.read_buffer()
     }
 
     unsafe fn advance(&mut self, n: usize) {
-        #[cfg(debug_assertions)]
-        {
-            let start = self.local_head & self.ptr.mask;
-            let contiguous = self.ptr.capacity - start;
-            let available = contiguous.min(self.local_tail.wrapping_sub(self.local_head));
-            assert!(
-                n <= available,
-                "advancing ({n}) more than available space ({available})"
-            );
-        }
-
-        let new_head = self.local_head.wrapping_add(n);
-        self.store_head(new_head);
-        self.local_head = new_head;
+        unsafe { self.consumer.advance(n) };
     }
 }
 
@@ -178,16 +96,16 @@ mod test {
     use core::num::NonZeroUsize;
 
     #[test]
-    fn clone_does_not_claim_live_receiver_shard_after_sender_drop() {
+    fn try_clone_does_not_claim_live_receiver_shard_after_sender_drop() {
         let (tx, rx0) = super::super::channel::<usize>(
             NonZeroUsize::new(2).unwrap(),
             NonZeroUsize::new(4).unwrap(),
         );
-        let rx1 = rx0.clone().unwrap();
+        let rx1 = rx0.try_clone().unwrap();
 
-        assert!(rx1.clone().is_none());
+        assert!(rx1.try_clone().is_none());
 
         drop(tx);
-        assert!(rx1.clone().is_none());
+        assert!(rx1.try_clone().is_none());
     }
 }

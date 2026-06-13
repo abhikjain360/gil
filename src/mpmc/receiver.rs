@@ -1,5 +1,5 @@
 #[cfg(feature = "std")]
-use crate::mpmc::queue::FutexState;
+use crate::futex::RECEIVER_WAITING;
 use crate::{atomic::Ordering, mpmc::queue::QueuePtr};
 
 /// The consumer end of the MPMC queue.
@@ -85,12 +85,12 @@ impl<T> Receiver<T> {
                 return ret;
             }
             #[cfg(feature = "std")]
-            if backoff.backoff() && self.ptr.prepare_wait(FutexState::ReceiversWaiting) {
+            if backoff.backoff() && self.ptr.futex().announce(RECEIVER_WAITING) {
                 // catch lost wakes
                 if let Some(ret) = self.try_recv() {
                     return ret;
                 }
-                self.ptr.wait(FutexState::ReceiversWaiting);
+                self.ptr.futex().sleep(RECEIVER_WAITING);
             }
             #[cfg(not(feature = "std"))]
             backoff.backoff();
@@ -150,7 +150,7 @@ impl<T> Receiver<T> {
                             );
 
                             #[cfg(feature = "std")]
-                            self.ptr.wake();
+                            self.ptr.futex().wake_all();
 
                             self.local_head = next_epoch;
                             return Some(ret);

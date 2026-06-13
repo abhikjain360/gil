@@ -30,7 +30,7 @@ fn run_sustained(label: &str, size: NonZeroUsize, count: usize, sender_count: us
 
     let mut sender_handles = Vec::new();
     for sender_id in 0..sender_count - 1 {
-        let mut tx_clone = tx.clone().unwrap();
+        let mut tx_clone = tx.try_clone().unwrap();
         let items = support::work_items(count, sender_id, sender_count);
         sender_handles.push(thread::spawn(move || {
             for i in 0..items {
@@ -83,7 +83,7 @@ fn run_bursty(
 
     let mut sender_handles = Vec::new();
     for sender_id in 1..sender_count {
-        let mut tx_clone = tx.clone().unwrap();
+        let mut tx_clone = tx.try_clone().unwrap();
         let items = support::work_items(burst_size, sender_id, sender_count);
         sender_handles.push(thread::spawn(move || {
             for b in 0..bursts {

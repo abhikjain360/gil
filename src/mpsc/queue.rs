@@ -1,9 +1,8 @@
-use core::marker::PhantomData;
-
 use crate::{
-    atomic::{AtomicUsize, Ordering},
-    cell::{Cell, CellPtr},
+    atomic::AtomicUsize,
+    cell::{Cell, DropTailScan},
     padded::Padded,
+    ring::RingTail,
 };
 
 #[derive(Default)]
@@ -12,53 +11,26 @@ pub(crate) struct Tail {
     tail: Padded<AtomicUsize>,
 }
 
-pub(crate) struct GetInit;
-impl<T> crate::DropInitItems<(), Tail, Cell<T>> for GetInit {
-    unsafe fn drop_init_items(
-        _head: core::ptr::NonNull<()>,
-        tail: core::ptr::NonNull<Tail>,
-        capacity: usize,
-        at: impl Fn(usize) -> core::ptr::NonNull<Cell<T>>,
-    ) {
-        if !core::mem::needs_drop::<T>() {
-            return;
-        }
-
-        let tail = unsafe { _field!(Tail, tail, tail.value, AtomicUsize).as_ref() }
-            .load(Ordering::Relaxed);
-
-        for i in 1..=capacity {
-            let idx = tail.wrapping_sub(i);
-            let cell = CellPtr::from(at(idx));
-            if cell.epoch().load(Ordering::Relaxed) == idx.wrapping_add(1) {
-                unsafe { cell.drop_in_place() };
-            }
-        }
+impl RingTail for Tail {
+    #[inline(always)]
+    fn tail(&self) -> &AtomicUsize {
+        &self.tail.value
     }
 }
 
-pub(crate) struct Initializer<T> {
-    _marker: PhantomData<T>,
-}
-impl<T> crate::Initializer for Initializer<T> {
-    type Item = Cell<T>;
-
-    fn initialize(idx: usize, cell: &mut Self::Item) {
-        cell.epoch.store(idx, Ordering::Relaxed);
-    }
-}
-
-pub(crate) type Queue = crate::Queue<(), Tail>;
-pub(crate) type QueuePtr<T> = crate::QueuePtr<(), Tail, Cell<T>, GetInit>;
+pub(crate) type QueuePtr<T> = crate::QueuePtr<(), Tail, Cell<T>, DropTailScan>;
 
 impl<T> QueuePtr<T> {
     #[inline(always)]
     pub(crate) fn tail(&self) -> &AtomicUsize {
-        unsafe { _field!(Queue, self.ptr, tail.tail.value, AtomicUsize).as_ref() }
+        self.header().tail.tail()
     }
 
     #[inline(always)]
-    pub(crate) fn cell_at(&self, index: usize) -> CellPtr<T> {
-        self.at(index).into()
+    pub(crate) fn cell_at(&self, index: usize) -> &Cell<T> {
+        // SAFETY: `at` masks the index into the buffer, and every cell is valid
+        // for shared access (epoch initialised at construction, payload behind
+        // `UnsafeCell<MaybeUninit<_>>`).
+        unsafe { self.at(index).as_ref() }
     }
 }

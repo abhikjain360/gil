@@ -1,8 +1,8 @@
 use crate::{
     Backoff, Box,
-    queue::ShardOwnership,
     read_guard::BatchReader,
-    spsc::{self, shards::ShardsPtr},
+    ring::Consumer,
+    shard_table::{Cursor, Shard, ShardTable},
 };
 
 /// The receiving half of a sharded MPSC channel.
@@ -25,24 +25,15 @@ use crate::{
 /// assert_eq!(rx.recv(), 2);
 /// ```
 pub struct Receiver<T> {
-    receivers: Box<[spsc::Receiver<T, ShardOwnership>]>,
-    max_shards: usize,
-    next_shard: usize,
+    consumers: Box<[Consumer<Shard<T>>]>,
+    cursor: Cursor,
 }
 
 impl<T> Receiver<T> {
-    pub(crate) fn new(shards: ShardsPtr<T>, max_shards: usize) -> Self {
-        let mut receivers = Box::new_uninit_slice(max_shards);
-
-        for i in 0..max_shards {
-            let shard = shards.claim_consumer_queue_ptr(i).unwrap();
-            receivers[i].write(spsc::Receiver::new(shard));
-        }
-
+    pub(crate) fn new(table: &ShardTable<T>) -> Self {
         Self {
-            receivers: unsafe { receivers.assume_init() },
-            max_shards,
-            next_shard: 0,
+            consumers: table.claim_all_consumers().map(Consumer::attach).collect(),
+            cursor: Cursor::new(table.len()),
         }
     }
 
@@ -122,23 +113,15 @@ impl<T> Receiver<T> {
     /// assert_eq!(rx.try_recv(), Some(42));
     /// ```
     pub fn try_recv(&mut self) -> Option<T> {
-        let start = self.next_shard;
-        loop {
-            let ret = self.receivers[self.next_shard].try_recv();
+        // Locate a non-empty shard in the scan, then pop outside it: a pop
+        // inside the closure would route the value through an extra `Option<T>`
+        // return — a copy of `T` on the hot path for large payloads.
+        let consumers = &mut self.consumers;
+        let shard_idx = self
+            .cursor
+            .find(|shard_idx| consumers[shard_idx].has_items().then_some(shard_idx))?;
 
-            if ret.is_some() {
-                return ret;
-            }
-
-            self.next_shard += 1;
-            if self.next_shard == self.max_shards {
-                self.next_shard = 0;
-            }
-
-            if self.next_shard == start {
-                return None;
-            }
-        }
+        Some(self.consumers[shard_idx].pop())
     }
 
     /// Returns a [`ReadGuard`](crate::read_guard::ReadGuard) that provides
@@ -207,22 +190,17 @@ unsafe impl<T> BatchReader for Receiver<T> {
     /// unsafe { rx.advance(count) };
     /// ```
     fn read_buffer(&mut self) -> &[T] {
-        let start = self.next_shard;
-        loop {
-            let ret = self.receivers[self.next_shard].read_buffer();
+        let consumers = &mut self.consumers;
+        let found = self.cursor.find(|shard_idx| {
+            let (ptr, len) = consumers[shard_idx].read_buffer_raw();
+            (len > 0).then_some((ptr, len))
+        });
 
-            if !ret.is_empty() {
-                return unsafe { core::mem::transmute::<&[T], &[T]>(ret) };
-            }
-
-            self.next_shard += 1;
-            if self.next_shard == self.max_shards {
-                self.next_shard = 0;
-            }
-
-            if self.next_shard == start {
-                return &[];
-            }
+        match found {
+            // SAFETY: raw parts of the found shard's ring, which `self` keeps
+            // alive; rebuilt here only so the slice outlives the scan closure.
+            Some((ptr, len)) => unsafe { core::slice::from_raw_parts(ptr.as_ptr(), len) },
+            None => &[],
         }
     }
 
@@ -254,7 +232,7 @@ unsafe impl<T> BatchReader for Receiver<T> {
     /// assert_eq!(rx.try_recv(), None);
     /// ```
     unsafe fn advance(&mut self, len: usize) {
-        unsafe { self.receivers[self.next_shard].advance(len) };
+        unsafe { self.consumers[self.cursor.index()].advance(len) };
     }
 }
 

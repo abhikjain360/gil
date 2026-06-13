@@ -1,8 +1,8 @@
 use core::mem::MaybeUninit;
 
 use crate::{
-    atomic::Ordering,
-    spsc::parking::queue::{FutexState, QueuePtr},
+    futex::SENDER_WAITING,
+    ring::{Producer, Ring},
 };
 
 /// The producer end of the parking SPSC queue.
@@ -23,17 +23,13 @@ use crate::{
 /// assert_eq!(rx.recv(), 2);
 /// ```
 pub struct Sender<T> {
-    ptr: QueuePtr<T>,
-    local_head: usize,
-    local_tail: usize,
+    producer: Producer<Ring<T>>,
 }
 
 impl<T> Sender<T> {
-    pub(crate) fn new(queue_ptr: QueuePtr<T>) -> Self {
+    pub(crate) fn new(ring: Ring<T>) -> Self {
         Self {
-            ptr: queue_ptr,
-            local_head: 0,
-            local_tail: 0,
+            producer: Producer::attach(ring),
         }
     }
 
@@ -61,20 +57,8 @@ impl<T> Sender<T> {
     /// assert!(tx.try_send(3).is_ok());
     /// ```
     pub fn try_send(&mut self, value: T) -> Result<(), T> {
-        if self.is_full() {
-            self.load_head();
-            if self.is_full() {
-                return Err(value);
-            }
-        }
-
-        let new_tail = self.local_tail.wrapping_add(1);
-        unsafe { self.ptr.set(self.local_tail, value) };
-        self.store_tail(new_tail);
-        self.local_tail = new_tail;
-
-        self.ptr.futex_wake();
-
+        self.producer.try_push(value)?;
+        self.producer.ring().futex().wake();
         Ok(())
     }
 
@@ -96,24 +80,26 @@ impl<T> Sender<T> {
     /// assert_eq!(rx.recv(), 42);
     /// ```
     pub fn send(&mut self, value: T) {
+        // Wait for space, then move the value straight into the ring. We don't
+        // route the value through `try_push` here: its `Result<(), T>` would add
+        // a copy of `value` on the hot path for large payloads.
         let mut backoff = crate::ParkingBackoff::new(16, 4);
-        while self.is_full() {
-            if backoff.backoff() && self.ptr.futex_store(FutexState::SenderWaiting) {
-                // catch lost unparks first before trying to park self
-                self.load_head();
-                if self.is_full() {
-                    self.ptr.futex_wait(FutexState::SenderWaiting);
+        while self.producer.is_full() {
+            if backoff.backoff() {
+                let futex = self.producer.ring().futex();
+                if futex.announce(SENDER_WAITING) {
+                    // catch lost wakes: recheck against a fresh head before parking
+                    self.producer.refresh_head();
+                    if self.producer.is_full() {
+                        futex.sleep(SENDER_WAITING);
+                    }
                 }
-            };
-            self.load_head();
+            }
+            self.producer.refresh_head();
         }
+        self.producer.push(value);
 
-        let new_tail = self.local_tail.wrapping_add(1);
-        unsafe { self.ptr.set(self.local_tail, value) };
-        self.store_tail(new_tail);
-        self.local_tail = new_tail;
-
-        self.ptr.futex_wake();
+        self.producer.ring().futex().wake();
     }
 
     /// Returns a mutable slice to the available write buffer in the queue.
@@ -154,21 +140,7 @@ impl<T> Sender<T> {
     /// }
     /// ```
     pub fn write_buffer(&mut self) -> &mut [MaybeUninit<T>] {
-        let mut available = self.ptr.size - self.local_tail.wrapping_sub(self.local_head);
-
-        if available == 0 {
-            self.load_head();
-            available = self.ptr.size - self.local_tail.wrapping_sub(self.local_head);
-        }
-
-        let start = self.local_tail & self.ptr.mask;
-        let contiguous = self.ptr.capacity - start;
-        let len = available.min(contiguous);
-
-        unsafe {
-            let ptr = self.ptr.exact_at(start).cast();
-            core::slice::from_raw_parts_mut(ptr.as_ptr(), len)
-        }
+        self.producer.write_buffer()
     }
 
     /// Commits items written to the buffer obtained via [`write_buffer`](Sender::write_buffer).
@@ -199,39 +171,8 @@ impl<T> Sender<T> {
     /// ```
     #[inline(always)]
     pub unsafe fn commit(&mut self, len: usize) {
-        #[cfg(debug_assertions)]
-        {
-            let start = self.local_tail & self.ptr.mask;
-            let contiguous = self.ptr.capacity - start;
-            let available =
-                contiguous.min(self.ptr.size - self.local_tail.wrapping_sub(self.local_head));
-            assert!(
-                len <= available,
-                "advancing ({len}) more than available space ({available})"
-            );
-        }
-
-        // the len can be just right at the edge of buffer, so we need to wrap just in case
-        let new_tail = self.local_tail.wrapping_add(len);
-        self.store_tail(new_tail);
-        self.local_tail = new_tail;
-
-        self.ptr.futex_wake();
-    }
-
-    #[inline(always)]
-    fn is_full(&self) -> bool {
-        self.local_tail.wrapping_sub(self.local_head) >= self.ptr.size
-    }
-
-    #[inline(always)]
-    fn store_tail(&self, value: usize) {
-        self.ptr.tail().store(value, Ordering::Release);
-    }
-
-    #[inline(always)]
-    fn load_head(&mut self) {
-        self.local_head = self.ptr.head().load(Ordering::Acquire);
+        unsafe { self.producer.commit(len) };
+        self.producer.ring().futex().wake();
     }
 }
 

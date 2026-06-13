@@ -5,9 +5,9 @@ extern crate alloc as alloc_crate;
 #[cfg(any(test, feature = "std"))]
 extern crate std;
 
-#[cfg(not(feature = "loom"))]
-pub(crate) use alloc_crate::alloc;
 pub(crate) use alloc_crate::boxed::Box;
+#[cfg(not(feature = "loom"))]
+pub(crate) use alloc_crate::{alloc, sync::Arc};
 
 #[expect(unused_imports)]
 #[cfg(not(feature = "loom"))]
@@ -23,6 +23,8 @@ pub(crate) mod thread {
     pub(crate) use core::hint::spin_loop as yield_now;
 }
 
+#[cfg(feature = "loom")]
+pub(crate) use loom::sync::Arc;
 #[expect(unused_imports)]
 #[cfg(feature = "loom")]
 pub(crate) use loom::{
@@ -38,23 +40,17 @@ pub(crate) mod alloc {
     pub use loom::alloc::dealloc;
 }
 
-macro_rules! _field {
-    ($ty:ty, $ptr:expr, $($path:tt).+) => {
-        $ptr.byte_add(core::mem::offset_of!($ty, $($path).+))
-    };
-
-    ($ty:ty, $ptr:expr, $($path:tt).+, $field_ty:ty) => {
-        $ptr.byte_add(core::mem::offset_of!($ty, $($path).+)).cast::<$field_ty>()
-    };
-}
-
 mod backoff;
 mod cell;
+#[cfg(feature = "std")]
+pub(crate) mod futex;
 pub mod mpmc;
 pub mod mpsc;
 mod padded;
-pub mod queue;
+pub(crate) mod queue;
 pub mod read_guard;
+pub(crate) mod ring;
+pub(crate) mod shard_table;
 pub mod spmc;
 pub mod spsc;
 
