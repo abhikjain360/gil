@@ -69,13 +69,14 @@ impl Futex {
         // `Relaxed` is enough on the CAS itself: no data is published through
         // the word (RMWs read the latest value regardless of ordering), and
         // all cross-location ordering comes from the fence below.
-        let announced = match self
-            .word()
-            .compare_exchange(FREE, who, Ordering::Relaxed, Ordering::Relaxed)
-        {
-            Ok(_) => true,
-            Err(current) => current == who,
-        };
+        let announced =
+            match self
+                .word()
+                .compare_exchange(FREE, who, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => true,
+                Err(current) => current == who,
+            };
         // Order the announce store before the caller's recheck loads:
         // store-then-load on different locations is only ordered through a
         // fence. Pairs with the fence in `wake`/`wake_all`; see module docs.
